@@ -12,6 +12,11 @@ interface CacheOptions {
 
 const NOT_FOUND_VALUE = undefined
 
+const isRedis = (obj): boolean => {
+  if (obj == null) { return false }
+  return ['set', 'get', 'setex', 'del', 'hset', 'get', 'hdel'].every(name => typeof obj[name] === 'function')
+}
+
 class Cache {
   redis: Redis;
   protected prefix: string;
@@ -19,11 +24,11 @@ class Cache {
 
   constructor(options: Redis | CacheOptions) {
     let config = options
-    if (options instanceof Redis) {
+    if (isRedis(options)) {
       config = { redis: options }
     }
 
-    if (config.redis instanceof Redis) {
+    if (isRedis(config.redis)) {
       this.redis = config.redis
     } else {
       this.redis = new Redis(config.redis)
