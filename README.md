@@ -97,7 +97,7 @@ Store the value to the id of key
 
 Get cached values of the id array of the key from redis. The uncached ids will be passed to the callback to get the corresponding values. These values will be stored in redis. Returns combined array of both cached and uncached values.
 
-This is useful if some ids were invalidated, you can recache multiple values at once. For example:
+This is useful if some cached ids were invalidated, you can recache multiple values at once. For example:
 
 ```javascript
 // invalidate cache of the changed post
@@ -108,7 +108,7 @@ const getPosts = (ids) =>
     const posts = await Post.queryAllPostsWithIds(uncachedIds)
     return posts.reduce((map, post) => {
       map[post.id] = post
-      return post
+      return map
     }, {})
   })
 ```
