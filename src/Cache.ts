@@ -40,6 +40,14 @@ class Cache {
     }
   }
 
+  static bind(target: Cache): Cache {
+    for (const name of Object.getOwnPropertyNames(Cache.prototype)) {
+      if (name === 'constructor') { continue }
+      target[name] = target[name].bind(target)
+    }
+    return target
+  }
+
   async cache<T>(key: string, fn: () => T, ttl?: number): Promise<T> {
     let value = await this.getCache(key)
     if (value !== NOT_FOUND_VALUE) {

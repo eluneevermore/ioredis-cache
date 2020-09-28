@@ -79,6 +79,14 @@ describe('Cache', () => {
     })
   })
 
+  describe('.bind', () => {
+    it('binds the functions of a cache with the cache', async () => {
+      const { setCache, getCache } = Cache.bind(cache)
+      await setCache(key, value1)
+      expect(getCache(key)).resolves.toEqual(value1)
+    })
+  })
+
   describe('#cache', () => {
     describe('when key exists', () => {
       beforeEach(async () => {
