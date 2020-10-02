@@ -14,7 +14,7 @@ const NOT_FOUND_VALUE = undefined
 
 const isRedis = (obj): boolean => {
   if (obj == null) { return false }
-  return ['set', 'get', 'setex', 'del', 'hset', 'get', 'hdel'].every(name => typeof obj[name] === 'function')
+  return ['set', 'get', 'setex', 'mget', 'pipeline', 'del', 'hset', 'get', 'hdel'].every(name => typeof obj[name] === 'function')
 }
 
 class Cache {
@@ -40,7 +40,7 @@ class Cache {
     }
   }
 
-  static bind(target: Cache): Cache {
+  static bindAll(target: Cache): Cache {
     for (const name of Object.getOwnPropertyNames(Cache.prototype)) {
       if (name === 'constructor') { continue }
       target[name] = target[name].bind(target)
@@ -66,6 +66,47 @@ class Cache {
   async setCache(key: string, value: any, ttl?: number) {
     const data = this.parser.stringify(value)
     return (ttl !== undefined ? this.redis.setex(key, ttl, data) : this.redis.set(key, data))
+  }
+
+  async manyCache(keys: string[], fn: (keys: string[]) => { [id: string]: any }, prefix: string = '', ttl?: number) {
+    const fullKeys = keys.map(key => `${prefix}${key}`)
+    const cachedValues = await this.getManyCache(fullKeys)
+    const uncachedKeys: string[] = []
+    for (let i = 0; i < cachedValues.length; ++i) {
+      if (cachedValues[i] === NOT_FOUND_VALUE) { uncachedKeys.push(keys[i]) }
+    }
+
+    if (uncachedKeys.length) {
+      const uncachedValueMap = await fn(uncachedKeys)
+      const fullKeyUncachedValueMap = Object.entries(uncachedValueMap).reduce((c, [key, value]) =>
+        Object.assign(c, { [`${prefix}${key}`]: value }), {})
+      await this.setManyCache(fullKeyUncachedValueMap, ttl)
+
+      for (let i = 0; i < cachedValues.length; ++i) {
+        if (cachedValues[i] === undefined) {
+          cachedValues[i] = uncachedValueMap[keys[i]]
+        }
+      }
+    }
+    return cachedValues
+  }
+
+  async getManyCache(keys: string[]) {
+    if (keys.length <= 0) { return [] }
+    let data = await this.redis.mget(keys)
+    data = data.map((e: string | null) => !e ? NOT_FOUND_VALUE : this.parser.parse(e))
+    return data
+  }
+
+  async setManyCache(valueMap: { [id: string]: any }, ttl?: number) {
+    const keys = Object.keys(valueMap)
+    if (keys.length <= 0) { return [] }
+    const params = this._buildSetParams(valueMap)
+    if (ttl === undefined) { return this.redis.mset(params) }
+    const pipeline = this.redis.pipeline()
+    pipeline.mset(params)
+    for (const key of keys) { pipeline.expire(key, ttl) }
+    return pipeline.exec()
   }
 
   async deleteCache(...keys: string[]): Promise<number> {
@@ -137,15 +178,20 @@ class Cache {
 
   async setHashManyCache(key: string, valueMap: { [id: string]: any; }) {
     if (Object.keys(valueMap).length <= 0) { return [] }
-    const params: string[] = []
-    for (let [key, value] of Object.entries(valueMap)) {
-      params.push(key, this.parser.stringify(value))
-    }
+    const params = this._buildSetParams(valueMap)
     return this.redis.hmset(key, params)
   }
 
   async deleteHashCache(key: string, ...ids: string[]): Promise<number> {
     return this.redis.hdel(key, ...ids)
+  }
+
+  protected _buildSetParams = (valueMap: { [id: string]: any; }) => {
+    const params: string[] = []
+    for (let [key, value] of Object.entries(valueMap)) {
+      params.push(key, this.parser.stringify(value))
+    }
+    return params
   }
 }
 

@@ -12,7 +12,7 @@ describe('Cache', () => {
   const redis = new Redis(config)
   const parser = { parse: (str: string) => ({}), stringify: (obj: any) => '' }
   const cache = new Cache(redis)
-  const key = 'test'
+  const key = 'test1'
   const key2 = 'test2'
   const value1 = { a: 1, o: { x: "!" } }
   const strValue1 = JSON.stringify(value1)
@@ -79,9 +79,9 @@ describe('Cache', () => {
     })
   })
 
-  describe('.bind', () => {
+  describe('.bindAll', () => {
     it('binds the functions of a cache with the cache', async () => {
-      const { setCache, getCache } = Cache.bind(cache)
+      const { setCache, getCache } = Cache.bindAll(cache)
       await setCache(key, value1)
       expect(getCache(key)).resolves.toEqual(value1)
     })
@@ -186,7 +186,7 @@ describe('Cache', () => {
 
   describe('#setCache', () => {
     beforeEach(async () => {
-      await redis.set(key, strValue1)
+      await redis.set(key, strValue2)
     })
 
     it('stores the value', async () => {
@@ -207,6 +207,100 @@ describe('Cache', () => {
         await sleep(ttl * 1000 + 100)
         const result = await cache.getCache(key)
         expect(result).toBe(undefined)
+      })
+    })
+  })
+
+  describe('#manyCache', () => {
+    let fn: jest.MockedFunction<(...keys: any[]) => { [id: string]: any }>
+    const prefix = 'test_'
+    const cachedMapWithPrefix = Object.entries(cachedMap).reduce((c, [key, value]) =>
+      Object.assign(c, { [`${prefix}${key}`]: value }), {})
+
+    beforeEach(async () => {
+      await cache.setManyCache(cachedMapWithPrefix)
+      fn = jest.fn(queryManyFn)
+    })
+
+    it('passes uncached ids to callback', async () => {
+      const result = await cache.manyCache(allIds, fn, prefix)
+      expect(fn.mock.calls.length).toBe(1)
+      expect(fn.mock.calls[0][0]).toContain('uncached')
+      expect(fn.mock.calls[0][0]).toContain('empty')
+    })
+
+    it('returns combined cached and uncached values', async () => {
+      const result = await cache.manyCache(allIds, fn, prefix)
+      expect(result).toEqual([1, "abc", 2, undefined])
+    })
+
+    it('stores the uncached values', async () => {
+      await cache.manyCache(allIds, fn, prefix)
+      const result = await cache.manyCache(allIds, fn, prefix)
+      expect(result).toEqual([1, "abc", 2, undefined])
+
+      expect(fn.mock.calls[1][0]).toEqual(['empty'])
+    })
+
+    describe('with ttl', () => {
+      it('stores the uncached values within ttl', async () => {
+        await cache.manyCache(allIds, fn, prefix, ttl)
+        const result = await cache.getCache(`${prefix}uncached`)
+        expect(result).toEqual("abc")
+      })
+
+      it('deletes the uncached value after ttl', async () => {
+        await cache.manyCache(allIds, fn, prefix, ttl)
+        await sleep(ttl * 1000 + 100)
+        const result = await cache.getCache(`${prefix}uncached`)
+        expect(result).toBe(undefined)
+      })
+
+      it('does not delete the cached value after ttl', async () => {
+        await cache.manyCache(allIds, fn, prefix, ttl)
+        await sleep(ttl * 1000 + 100)
+        const result = await cache.getCache(`${prefix}cached1`)
+        expect(result).toEqual(1)
+      })
+    })
+  })
+
+  describe('#getManyCache', () => {
+    beforeEach(async () => {
+      await redis.set(key, strValue1)
+    })
+
+    it('returns cached values and undefined for uncached values', async () => {
+      const result = await cache.getManyCache(['test1', 'test2'])
+      expect(result).toEqual([value1, undefined])
+    })
+  })
+
+  describe('#setManyCache', () => {
+    beforeEach(async () => {
+      await redis.set(key, strValue2)
+    })
+
+    it('stores the value', async () => {
+      await cache.setManyCache({ [key]: value1, [key2]: value2 })
+      const result1 = await cache.getCache(key)
+      expect(result1).toEqual(value1)
+      const result2 = await cache.getCache(key2)
+      expect(result2).toEqual(value2)
+    })
+
+    describe('when pass ttl', () => {
+      it('stores the value within ttl', async () => {
+        await cache.setManyCache({ [key]: value1, [key2]: value2 }, ttl)
+        const result = await cache.getManyCache([key, key2])
+        expect(result).toEqual([value1, value2])
+      })
+
+      it('deletes the value after ttl', async () => {
+        await cache.setManyCache({ [key]: value1, [key2]: value2 }, ttl)
+        await sleep(ttl * 1000 + 100)
+        const result = await cache.getManyCache([key, key2])
+        expect(result).toEqual([undefined, undefined])
       })
     })
   })
@@ -255,7 +349,7 @@ describe('Cache', () => {
     })
   })
 
-  describe('hashCache', () => {
+  describe('#hashCache', () => {
     describe('when id exists', () => {
 
       beforeEach(async () => {
