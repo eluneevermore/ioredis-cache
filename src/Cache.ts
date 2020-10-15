@@ -48,7 +48,7 @@ class Cache {
     return target
   }
 
-  async cache<T>(key: string, fn: () => T, ttl?: number): Promise<T> {
+  async cache<T>(key: string, fn: () => T|Promise<T>, ttl?: number): Promise<T> {
     let value = await this.getCache(key)
     if (value !== NOT_FOUND_VALUE) {
       return value
@@ -130,7 +130,7 @@ class Cache {
     await Promise.all(jobs)
   }
 
-  async hashCache<T>(key: string, id: string, fn: () => T): Promise<T> {
+  async hashCache<T>(key: string, id: string, fn: () => T|Promise<T>): Promise<T> {
     let value = await this.getHashCache(key, id)
     if (value !== NOT_FOUND_VALUE) {
       return value

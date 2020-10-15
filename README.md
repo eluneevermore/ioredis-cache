@@ -30,7 +30,14 @@ Compact redis cache using [ioredis](https://github.com/luin/ioredis).
   const value = await cache.cache("key", async () => ({ foo: "bar" }))
 ```
 
-## API
+## Notes
+
+Depends on your cases, you may want to disconnect redis after using:
+```
+cache.redis.quit()
+```
+
+## APIs
 
 ### `#constructor(args: Redis | CacheOptions)`
 
