@@ -97,7 +97,7 @@ const getPosts = (ids) =>
   }, prefix: 'post-', 60 * 60)
 ```
 
-### `getManyCache(keys: string[]): Promise<any[]>`
+### `#getManyCache(keys: string[]): Promise<any[]>`
 
 Return cached values of a list of keys from redis. If a key does not exist, the value will be `undefined`.
 
@@ -140,7 +140,7 @@ Return the cached id of the key from redis. If the id / key does not exist, retu
 
 Store the value to the id of key
 
-### `hashManyCache(key: string, ids: string[], callback: (ids: string[]) => { [id: string]: any }): Promise<any[]>`
+### `#hashManyCache(key: string, ids: string[], callback: (ids: string[]) => { [id: string]: any }): Promise<any[]>`
 
 Get cached values of the id array of the key from redis. The uncached ids will be passed to the callback to get the corresponding values. These values will be stored in redis. Returns combined array of both cached and uncached values.
 
@@ -157,15 +157,15 @@ const getPosts = (ids) =>
   })
 ```
 
-### `getHashManyCache(key: string, ids: string[]): Promise<any[]>`
+### `#getHashManyCache(key: string, ids: string[]): Promise<any[]>`
 
 Return cached values of the id array of the key from redis. If the id / key does not exist, the value will be `undefined`.
 
-### `setHashManyCache(key: string, valueMap: { [id: string]: any })`
+### `#setHashManyCache(key: string, valueMap: { [id: string]: any })`
 
 Store the values with the corresponding ids of the key in redis
 
-### `deleteHashCache(key: string, ...ids: string[]): Promise<number>`
+### `#deleteHashCache(key: string, ...ids: string[]): Promise<number>`
 
 Delete the cached ids of the key from redis and return the deleted number
 
