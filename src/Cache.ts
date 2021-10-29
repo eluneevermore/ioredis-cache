@@ -10,6 +10,12 @@ interface CacheOptions {
   parser: Parser
 }
 
+type Key = string|number
+
+type Map<T> = { [id: string]: T }
+
+type Awaitable<T> = T|Promise<T>
+
 const NOT_FOUND_VALUE = undefined
 
 const isRedis = (obj): boolean => {
@@ -48,7 +54,7 @@ class Cache {
     return target
   }
 
-  async cache<T>(key: string, fn: () => T|Promise<T>, ttl?: number): Promise<T> {
+  async cache<T>(key: Key, fn: () => Awaitable<T>, ttl?: number): Promise<T> {
     let value = await this.getCache(key)
     if (value !== NOT_FOUND_VALUE) {
       return value
@@ -58,20 +64,20 @@ class Cache {
     return value
   }
 
-  async getCache(key: string) {
+  async getCache(key: Key) {
     const data = await this.redis.get(key)
     return data ? this.parser.parse(data) : NOT_FOUND_VALUE
   }
 
-  async setCache(key: string, value: any, ttl?: number) {
+  async setCache(key: Key, value: any, ttl?: number) {
     const data = this.parser.stringify(value)
     return (ttl !== undefined ? this.redis.setex(key, ttl, data) : this.redis.set(key, data))
   }
 
-  async manyCache(keys: string[], fn: (keys: string[]) => { [id: string]: any }, prefix: string = '', ttl?: number) {
+  async manyCache<T>(keys: Key[], fn: (keys: Key[]) => Awaitable<Map<T>>, prefix: Key = '', ttl?: number): Promise<T[]> {
     const fullKeys = keys.map(key => `${prefix}${key}`)
     const cachedValues = await this.getManyCache(fullKeys)
-    const uncachedKeys: string[] = []
+    const uncachedKeys: Key[] = []
     for (let i = 0; i < cachedValues.length; ++i) {
       if (cachedValues[i] === NOT_FOUND_VALUE) { uncachedKeys.push(keys[i]) }
     }
@@ -83,7 +89,7 @@ class Cache {
       await this.setManyCache(fullKeyUncachedValueMap, ttl)
 
       for (let i = 0; i < cachedValues.length; ++i) {
-        if (cachedValues[i] === undefined) {
+        if (cachedValues[i] === NOT_FOUND_VALUE) {
           cachedValues[i] = uncachedValueMap[keys[i]]
         }
       }
@@ -91,7 +97,7 @@ class Cache {
     return cachedValues
   }
 
-  async getManyCache(keys: string[]) {
+  async getManyCache(keys: Key[]): Promise<any[]> {
     if (keys.length <= 0) { return [] }
     let data = await this.redis.mget(keys)
     data = data.map((e: string | null) => !e ? NOT_FOUND_VALUE : this.parser.parse(e))
@@ -109,7 +115,7 @@ class Cache {
     return pipeline.exec()
   }
 
-  async deleteCache(...keys: string[]): Promise<number> {
+  async deleteCache(...keys: Key[]): Promise<number> {
     return this.redis.del(...keys)
   }
 
@@ -130,7 +136,7 @@ class Cache {
     await Promise.all(jobs)
   }
 
-  async hashCache<T>(key: string, id: string, fn: () => T|Promise<T>): Promise<T> {
+  async hashCache<T>(key: Key, id: Key, fn: () => Awaitable<T>): Promise<T> {
     let value = await this.getHashCache(key, id)
     if (value !== NOT_FOUND_VALUE) {
       return value
@@ -140,19 +146,19 @@ class Cache {
     return value
   }
 
-  async getHashCache(key: string, id: string) {
+  async getHashCache(key: Key, id: Key) {
     const data = await this.redis.hget(key, id)
     return data ? this.parser.parse(data) : NOT_FOUND_VALUE
   }
 
-  async setHashCache(key: string, id: string, value: any) {
+  async setHashCache(key: Key, id: Key, value: any): Promise<number> {
     const data = this.parser.stringify(value)
     return this.redis.hset(key, id, data)
   }
 
-  async hashManyCache(key: string, ids: string[], fn: (ids: string[]) => { [id: string]: any }): Promise<any[]> {
+  async hashManyCache<T>(key: Key, ids: Key[], fn: (ids: Key[]) => Awaitable<Map<T>>): Promise<T[]> {
     const cachedValues = await this.getHashManyCache(key, ids)
-    const uncachedIds: string[] = []
+    const uncachedIds: Key[] = []
     for (let i = 0; i < cachedValues.length; ++i) {
       if (cachedValues[i] === NOT_FOUND_VALUE) { uncachedIds.push(ids[i]) }
     }
@@ -161,7 +167,7 @@ class Cache {
       const uncachedValueMap = await fn(uncachedIds)
       await this.setHashManyCache(key, uncachedValueMap)
       for (let i = 0; i < cachedValues.length; ++i) {
-        if (cachedValues[i] === undefined) {
+        if (cachedValues[i] === NOT_FOUND_VALUE) {
           cachedValues[i] = uncachedValueMap[ids[i]]
         }
       }
@@ -169,20 +175,20 @@ class Cache {
     return cachedValues
   }
 
-  async getHashManyCache(key: string, ids: string[]): Promise<any[]> {
+  async getHashManyCache(key: Key, ids: Key[]): Promise<any[]> {
     if (ids.length <= 0) { return [] }
     let data = await this.redis.hmget(key, ids)
     data = data.map((e: string | null) => !e ? NOT_FOUND_VALUE : this.parser.parse(e))
     return data
   }
 
-  async setHashManyCache(key: string, valueMap: { [id: string]: any; }) {
+  async setHashManyCache(key: Key, valueMap: { [id: string]: any; }) {
     if (Object.keys(valueMap).length <= 0) { return [] }
     const params = this._buildSetParams(valueMap)
     return this.redis.hmset(key, params)
   }
 
-  async deleteHashCache(key: string, ...ids: string[]): Promise<number> {
+  async deleteHashCache(key: Key, ...ids: Key[]): Promise<number> {
     return this.redis.hdel(key, ...ids)
   }
 
