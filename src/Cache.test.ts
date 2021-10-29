@@ -487,6 +487,42 @@ describe('Cache', () => {
     })
   })
 
+  describe('#acquire', () => {
+    let fn: (number) => number = (current) => current
+
+    it('increases value and return fn call', async () => {
+      expect(await cache.acquire(key, 2, fn)).toBe(2)
+      expect(await cache.getCache(key)).toBe(2)
+      expect(await cache.acquire(key, 1, fn)).toBe(3)
+      expect(await cache.getCache(key)).toBe(3)
+      expect(await cache.acquire(key2, 2.5, fn, true)).toBe(2.5)
+      expect(await cache.getCache(key2)).toBe(2.5)
+    })
+    it('release value if fn raise error', async () => {
+      let fn = (number) => { throw new Error(number) }
+      await expect(cache.acquire(key, 2, fn)).rejects.toThrow('2')
+      expect(await cache.getCache(key)).toBe(0)
+    })
+  })
+
+  describe('#hashAcquire', () => {
+    let fn: (number) => number = (current) => current
+
+    it('increases value and return fn call', async () => {
+      expect(await cache.hashAcquire(key, id, 2, fn)).toBe(2)
+      expect(await cache.getHashCache(key, id)).toBe(2)
+      expect(await cache.hashAcquire(key, id, 1, fn)).toBe(3)
+      expect(await cache.getHashCache(key, id)).toBe(3)
+      expect(await cache.hashAcquire(key2, id, 2.5, fn, true)).toBe(2.5)
+      expect(await cache.getHashCache(key2, id)).toBe(2.5)
+    })
+    it('release value if fn raise error', async () => {
+      let fn = (number) => { throw new Error(number) }
+      await expect(cache.hashAcquire(key, id, 2, fn)).rejects.toThrow('2')
+      expect(await cache.getHashCache(key, id)).toBe(0)
+    })
+  })
+
   afterAll(async () => {
     await redis.quit()
   })

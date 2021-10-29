@@ -120,6 +120,12 @@ deletePattern('post:*')
 ```
 Will remove all cached keys start with `"post:*"`.
 
+### `#acquire(key: string, amount: number, fn: (current: number) => any, float: boolean = false)`
+
+Increase the value of `key` by `amount` and pass it to `fn` function. If `fn` raises any exception, decrease the value of the `key` by `amount`.
+
+By default, `amount` is treate as an integer. Set `float = true` if `amount` is a float.
+
 ### `#hashCache(key: string, id: string, callback: () => any): Promise<any>`
 
 Get the cached id of the key from redis. If the id or key does not exist, get the value from the callback, store it in redis and return the value.
@@ -162,6 +168,12 @@ Store the values with the corresponding ids of the key in redis
 ### `deleteHashCache(key: string, ...ids: string[]): Promise<number>`
 
 Delete the cached ids of the key from redis and return the deleted number
+
+### `#hashAcquire(key: string, id: string, amount: number, fn: (current: number) => any, float: boolean = false)`
+
+Increase the value of `id` in `key` by `amount` and pass it to `fn` function. If `fn` raises any exception, decrease the value of `id` in `key` by `amount`.
+
+By default, `amount` is treate as an integer. Set `float = true` if `amount` is a float.
 
 ## Run tests
 

@@ -10,11 +10,11 @@ interface CacheOptions {
   parser: Parser
 }
 
-type Key = string|number
+type Key = string | number
 
 type Map<T> = { [id: string]: T }
 
-type Awaitable<T> = T|Promise<T>
+type Awaitable<T> = T | Promise<T>
 
 const NOT_FOUND_VALUE = undefined
 
@@ -190,6 +190,32 @@ class Cache {
 
   async deleteHashCache(key: Key, ...ids: Key[]): Promise<number> {
     return this.redis.hdel(key, ...ids)
+  }
+
+  async acquire<T>(key: Key, amount: number, fn: (current: number) => Awaitable<T>, float: boolean = false): Promise<T> {
+    const change: (key: Key, amount: number) => Promise<number> = float ? this.redis.incrbyfloat : this.redis.incrby
+    const parser: (value: any) => number = float ? parseFloat : parseInt
+    try {
+      const current = await change.call(this.redis, key, amount)
+      const result = await fn(parser(current))
+      return result
+    } catch (error) {
+      const n = await change.call(this.redis, key, -amount)
+      throw error
+    }
+  }
+
+  async hashAcquire<T>(key: Key, id: Key, amount: number, fn: (current: number) => Awaitable<T>, float: boolean = false): Promise<T> {
+    const change: (key: Key, id: Key, amount: number) => Promise<number> = float ? this.redis.hincrbyfloat : this.redis.hincrby
+    const parser: (value: any) => number = float ? parseFloat : parseInt
+    try {
+      const current = await change.call(this.redis, key, id, amount)
+      const result = await fn(parser(current))
+      return result
+    } catch (error) {
+      await change.call(this.redis, key, id, -amount)
+      throw error
+    }
   }
 
   protected _buildSetParams = (valueMap: { [id: string]: any; }) => {
