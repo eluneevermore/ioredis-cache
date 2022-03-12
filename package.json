@@ -1,6 +1,6 @@
 {
   "name": "ioredis-cache",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "A promise-based cache package for Nodejs using IORedis",
   "main": "dist/index.js",
   "files": [
