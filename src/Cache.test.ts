@@ -33,6 +33,8 @@ describe('Cache', () => {
       }
       return c
     }, {})
+  const queryManyAsArrayFn = (ids) =>
+    ids.map(id => dataMap[id])
 
   const sleep = (ms) =>
     new Promise(resolve => {
@@ -213,6 +215,7 @@ describe('Cache', () => {
 
   describe('#manyCache', () => {
     let fn: jest.MockedFunction<(...keys: any[]) => { [id: string]: any }>
+    let fnAsArray: jest.MockedFunction<(...keys: any[]) => any[]>
     const prefix = 'test_'
     const cachedMapWithPrefix = Object.entries(cachedMap).reduce((c, [key, value]) =>
       Object.assign(c, { [`${prefix}${key}`]: value }), {})
@@ -220,6 +223,7 @@ describe('Cache', () => {
     beforeEach(async () => {
       await cache.setManyCache(cachedMapWithPrefix)
       fn = jest.fn(queryManyFn)
+      fnAsArray = jest.fn(queryManyAsArrayFn)
     })
 
     it('passes uncached ids to callback', async () => {
@@ -240,6 +244,15 @@ describe('Cache', () => {
       expect(result).toEqual([1, "abc", 2, undefined])
 
       expect(fn.mock.calls[1][0]).toEqual(['empty'])
+    })
+
+    it('works with fetcher return array', async () => {
+      await cache.manyCache(allIds, fnAsArray, prefix)
+      const result = await cache.manyCache(allIds, fnAsArray, prefix)
+      expect(result).toEqual([1, "abc", 2, undefined])
+      expect(fnAsArray.mock.calls[0][0]).toContain('uncached')
+      expect(fnAsArray.mock.calls[0][0]).toContain('empty')
+      expect(fnAsArray.mock.calls[1][0]).toEqual(['empty'])
     })
 
     describe('with ttl', () => {
@@ -418,10 +431,12 @@ describe('Cache', () => {
 
   describe('#hashManyCache', () => {
     let fn: jest.MockedFunction<(...keys: any[]) => { [id: string]: any }>
+    let fnAsArray: jest.MockedFunction<(...keys: any[]) => any[]>
 
     beforeEach(async () => {
       await cache.setHashManyCache(key, cachedMap)
       fn = jest.fn(queryManyFn)
+      fnAsArray = jest.fn(queryManyAsArrayFn)
     })
 
     it('passes uncached ids to callback', async () => {
@@ -441,6 +456,15 @@ describe('Cache', () => {
       const result = await cache.hashManyCache(key, allIds, fn)
       expect(result).toEqual([1, "abc", 2, undefined])
 
+      expect(fn.mock.calls[1][0]).toEqual(['empty'])
+    })
+
+    it('works with fetcher return array', async () => {
+      await cache.hashManyCache(key, allIds, fn)
+      const result = await cache.hashManyCache(key, allIds, fn)
+      expect(result).toEqual([1, "abc", 2, undefined])
+      expect(fn.mock.calls[0][0]).toContain('uncached')
+      expect(fn.mock.calls[0][0]).toContain('empty')
       expect(fn.mock.calls[1][0]).toEqual(['empty'])
     })
   })

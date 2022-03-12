@@ -74,7 +74,7 @@ class Cache {
     return (ttl !== undefined ? this.redis.setex(key, ttl, data) : this.redis.set(key, data))
   }
 
-  async manyCache<T>(keys: Key[], fn: (keys: Key[]) => Awaitable<Map<T>>, prefix: Key = '', ttl?: number): Promise<T[]> {
+  async manyCache<T>(keys: Key[], fn: (keys: Key[]) => Awaitable<Map<T> | T[]>, prefix: Key = '', ttl?: number): Promise<T[]> {
     const fullKeys = keys.map(key => `${prefix}${key}`)
     const cachedValues = await this.getManyCache(fullKeys)
     const uncachedKeys: Key[] = []
@@ -83,7 +83,10 @@ class Cache {
     }
 
     if (uncachedKeys.length) {
-      const uncachedValueMap = await fn(uncachedKeys)
+      const uncachedValues = await fn(uncachedKeys)
+      const uncachedValueMap = Array.isArray(uncachedValues)
+        ? uncachedKeys.reduce((c, key, idx) => Object.assign(c, { [key]: uncachedValues[idx] }), {})
+        : uncachedValues
       const fullKeyUncachedValueMap = Object.entries(uncachedValueMap).reduce((c, [key, value]) =>
         Object.assign(c, { [`${prefix}${key}`]: value }), {})
       await this.setManyCache(fullKeyUncachedValueMap, ttl)
@@ -156,7 +159,7 @@ class Cache {
     return this.redis.hset(key, id, data)
   }
 
-  async hashManyCache<T>(key: Key, ids: Key[], fn: (ids: Key[]) => Awaitable<Map<T>>): Promise<T[]> {
+  async hashManyCache<T>(key: Key, ids: Key[], fn: (ids: Key[]) => Awaitable<Map<T> | T[]>): Promise<T[]> {
     const cachedValues = await this.getHashManyCache(key, ids)
     const uncachedIds: Key[] = []
     for (let i = 0; i < cachedValues.length; ++i) {
@@ -164,7 +167,10 @@ class Cache {
     }
 
     if (uncachedIds.length) {
-      const uncachedValueMap = await fn(uncachedIds)
+      const uncachedValues = await fn(uncachedIds)
+      const uncachedValueMap = Array.isArray(uncachedValues)
+        ? uncachedIds.reduce((c, key, idx) => Object.assign(c, { [key]: uncachedValues[idx] }), {})
+        : uncachedValues
       await this.setHashManyCache(key, uncachedValueMap)
       for (let i = 0; i < cachedValues.length; ++i) {
         if (cachedValues[i] === NOT_FOUND_VALUE) {
