@@ -1,4 +1,4 @@
-import Redis from 'ioredis'
+import Redis, { RedisKey, RedisOptions } from 'ioredis'
 
 interface Parser {
   parse: (text: string) => any
@@ -6,11 +6,11 @@ interface Parser {
 }
 
 interface CacheOptions {
-  redis: object | Redis
-  parser: Parser
+  redis: RedisOptions | Redis
+  parser?: Parser
 }
 
-type Key = string | number
+type Key = RedisKey
 
 type Map<T> = { [id: string]: T }
 
@@ -29,18 +29,15 @@ class Cache {
   protected parser: Parser = JSON;
 
   constructor(options: Redis | CacheOptions) {
-    let config = options
-    if (isRedis(options)) {
-      config = { redis: options }
-    }
+    let config = (isRedis(options) ? { redis: options } : options) as CacheOptions
 
     if (isRedis(config.redis)) {
-      this.redis = config.redis
+      this.redis = config.redis as Redis
     } else {
-      this.redis = new Redis(config.redis)
+      this.redis = new Redis(config.redis as RedisOptions)
     }
 
-    this.prefix = this.redis.options.keyPrefix
+    this.prefix = this.redis.options.keyPrefix || ''
     if (config.parser !== undefined) {
       this.parser = config.parser
     }
@@ -85,7 +82,7 @@ class Cache {
     if (uncachedKeys.length) {
       const uncachedValues = await fn(uncachedKeys)
       const uncachedValueMap = Array.isArray(uncachedValues)
-        ? uncachedKeys.reduce((c, key, idx) => Object.assign(c, { [key]: uncachedValues[idx] }), {})
+        ? uncachedKeys.reduce((c, key, idx) => Object.assign(c, { [key.toString()]: uncachedValues[idx] }), {})
         : uncachedValues
       const fullKeyUncachedValueMap = Object.entries(uncachedValueMap).reduce((c, [key, value]) =>
         Object.assign(c, { [`${prefix}${key}`]: value }), {})
@@ -93,7 +90,7 @@ class Cache {
 
       for (let i = 0; i < cachedValues.length; ++i) {
         if (cachedValues[i] === NOT_FOUND_VALUE) {
-          cachedValues[i] = uncachedValueMap[keys[i]]
+          cachedValues[i] = uncachedValueMap[keys[i]?.toString()]
         }
       }
     }
@@ -169,12 +166,12 @@ class Cache {
     if (uncachedIds.length) {
       const uncachedValues = await fn(uncachedIds)
       const uncachedValueMap = Array.isArray(uncachedValues)
-        ? uncachedIds.reduce((c, key, idx) => Object.assign(c, { [key]: uncachedValues[idx] }), {})
+        ? uncachedIds.reduce((c, key, idx) => Object.assign(c, { [key.toString()]: uncachedValues[idx] }), {})
         : uncachedValues
       await this.setHashManyCache(key, uncachedValueMap)
       for (let i = 0; i < cachedValues.length; ++i) {
         if (cachedValues[i] === NOT_FOUND_VALUE) {
-          cachedValues[i] = uncachedValueMap[ids[i]]
+          cachedValues[i] = uncachedValueMap[ids[i]?.toString()]
         }
       }
     }
@@ -183,7 +180,7 @@ class Cache {
 
   async getHashManyCache(key: Key, ids: Key[]): Promise<any[]> {
     if (ids.length <= 0) { return [] }
-    let data = await this.redis.hmget(key, ids)
+    let data = await this.redis.hmget(key, ...ids)
     data = data.map((e: string | null) => !e ? NOT_FOUND_VALUE : this.parser.parse(e))
     return data
   }
@@ -199,7 +196,7 @@ class Cache {
   }
 
   async acquire<T>(key: Key, amount: number, fn: (current: number) => Awaitable<T>, float: boolean = false): Promise<T> {
-    const change: (key: Key, amount: number) => Promise<number> = float ? this.redis.incrbyfloat : this.redis.incrby
+    const change = (float ? this.redis.incrbyfloat : this.redis.incrby) as (key: Key, amount: number) => Promise<number>
     const parser: (value: any) => number = float ? parseFloat : parseInt
     try {
       const current = await change.call(this.redis, key, amount)
@@ -212,7 +209,7 @@ class Cache {
   }
 
   async hashAcquire<T>(key: Key, id: Key, amount: number, fn: (current: number) => Awaitable<T>, float: boolean = false): Promise<T> {
-    const change: (key: Key, id: Key, amount: number) => Promise<number> = float ? this.redis.hincrbyfloat : this.redis.hincrby
+    const change = (float ? this.redis.hincrbyfloat : this.redis.hincrby) as (key: Key, id: Key, amount: string | number) => Promise<string>
     const parser: (value: any) => number = float ? parseFloat : parseInt
     try {
       const current = await change.call(this.redis, key, id, amount)
