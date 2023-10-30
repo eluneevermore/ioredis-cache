@@ -71,10 +71,10 @@ class Cache {
     return (ttl !== undefined ? this.redis.setex(key, ttl, data) : this.redis.set(key, data))
   }
 
-  async manyCache<T>(keys: Key[], fn: (keys: Key[]) => Awaitable<Map<T> | T[]>, prefix: Key = '', ttl?: number): Promise<T[]> {
+  async manyCache<K extends Key, T>(keys: K[], fn: (keys: K[]) => Awaitable<Map<T> | T[]>, prefix: Key = '', ttl?: number): Promise<T[]> {
     const fullKeys = keys.map(key => `${prefix}${key}`)
     const cachedValues = await this.getManyCache(fullKeys)
-    const uncachedKeys: Key[] = []
+    const uncachedKeys: K[] = []
     for (let i = 0; i < cachedValues.length; ++i) {
       if (cachedValues[i] === NOT_FOUND_VALUE) { uncachedKeys.push(keys[i]) }
     }
@@ -90,7 +90,7 @@ class Cache {
 
       for (let i = 0; i < cachedValues.length; ++i) {
         if (cachedValues[i] === NOT_FOUND_VALUE) {
-          cachedValues[i] = uncachedValueMap[keys[i]?.toString()]
+          cachedValues[i] = uncachedValueMap[keys[i].toString()]
         }
       }
     }
@@ -156,9 +156,9 @@ class Cache {
     return this.redis.hset(key, id, data)
   }
 
-  async hashManyCache<T>(key: Key, ids: Key[], fn: (ids: Key[]) => Awaitable<Map<T> | T[]>): Promise<T[]> {
+  async hashManyCache<K extends Key, T>(key: Key, ids: K[], fn: (ids: K[]) => Awaitable<Map<T> | T[]>): Promise<T[]> {
     const cachedValues = await this.getHashManyCache(key, ids)
-    const uncachedIds: Key[] = []
+    const uncachedIds: K[] = []
     for (let i = 0; i < cachedValues.length; ++i) {
       if (cachedValues[i] === NOT_FOUND_VALUE) { uncachedIds.push(ids[i]) }
     }
@@ -171,7 +171,7 @@ class Cache {
       await this.setHashManyCache(key, uncachedValueMap)
       for (let i = 0; i < cachedValues.length; ++i) {
         if (cachedValues[i] === NOT_FOUND_VALUE) {
-          cachedValues[i] = uncachedValueMap[ids[i]?.toString()]
+          cachedValues[i] = uncachedValueMap[ids[i].toString()]
         }
       }
     }
