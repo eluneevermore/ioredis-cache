@@ -91,15 +91,15 @@ class Cache {
       : this.redis.set(key as RedisKey, data);
   }
 
-  async manyCache<T>(
-    keys: Key[],
-    fn: (keys: Key[]) => Awaitable<Map<T> | T[]>,
+  async manyCache<K extends Key, T>(
+    keys: K[],
+    fn: (keys: K[]) => Awaitable<Map<T> | T[]>,
     prefix: Key = "",
     ttl?: number
   ): Promise<T[]> {
     const fullKeys = keys.map((key) => `${prefix}${key}`);
     const cachedValues = await this.getManyCache<T>(fullKeys);
-    const uncachedKeys: Key[] = [];
+    const uncachedKeys: K[] = [];
     for (let i = 0; i < cachedValues.length; ++i) {
       if (cachedValues[i] === NOT_FOUND_VALUE) {
         uncachedKeys.push(keys[i]);
