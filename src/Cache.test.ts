@@ -79,7 +79,9 @@ describe('Cache', () => {
 
       it('throws an error', () => {
         expect(() => {
-          new Cache(params as unknown as ConstructorParameters<typeof Cache>[0]);
+          new Cache(
+            params as unknown as ConstructorParameters<typeof Cache>[0],
+          );
         }).toThrow('Cache requires an ioredis instance');
       });
     });
@@ -604,6 +606,42 @@ describe('Cache', () => {
     });
   });
 
+  describe('#acquireMany', () => {
+    it('acquires available amounts and releases lacking amounts', async () => {
+      await cache.setCache(key2, 4);
+      const result = await cache.acquireMany(
+        [
+          { key, desireAmount: 2 },
+          { key: key2, desireAmount: 3, limitAmount: 5 },
+        ],
+        (acquiredResults) => acquiredResults,
+      );
+      expect(result).toEqual([
+        { key, acquiredAmount: 2, lackingAmount: 0 },
+        { key: key2, acquiredAmount: 1, lackingAmount: 2 },
+      ]);
+      expect(await cache.getCache(key)).toBe(2);
+      expect(await cache.getCache(key2)).toBe(5);
+    });
+
+    it('releases acquired amounts when callback fails', async () => {
+      const fn = (): never => {
+        throw new Error('failed');
+      };
+      await expect(
+        cache.acquireMany(
+          [
+            { key, desireAmount: 2 },
+            { key: key2, desireAmount: 3 },
+          ],
+          fn,
+        ),
+      ).rejects.toThrow('failed');
+      expect(await cache.getCache(key)).toBe(0);
+      expect(await cache.getCache(key2)).toBe(0);
+    });
+  });
+
   describe('#hashAcquire', () => {
     let fn: (current: number) => number = (current) => current;
 
@@ -621,6 +659,47 @@ describe('Cache', () => {
       };
       await expect(cache.hashAcquire(key, id, 2, fn)).rejects.toThrow('2');
       expect(await cache.getHashCache(key, id)).toBe(0);
+    });
+  });
+
+  describe('#hashAcquireMany', () => {
+    it(
+      'acquires available hash amounts and releases lacking amounts',
+      async () => {
+        await cache.setHashCache(key, id2, 4);
+        const result = await cache.hashAcquireMany(
+          key,
+          [
+            { key: id, desireAmount: 2 },
+            { key: id2, desireAmount: 3, limitAmount: 5 },
+          ],
+          (acquiredResults) => acquiredResults,
+        );
+        expect(result).toEqual([
+          { key: id, acquiredAmount: 2, lackingAmount: 0 },
+          { key: id2, acquiredAmount: 1, lackingAmount: 2 },
+        ]);
+        expect(await cache.getHashCache(key, id)).toBe(2);
+        expect(await cache.getHashCache(key, id2)).toBe(5);
+      },
+    );
+
+    it('releases acquired hash amounts when callback fails', async () => {
+      const fn = (): never => {
+        throw new Error('failed');
+      };
+      await expect(
+        cache.hashAcquireMany(
+          key,
+          [
+            { key: id, desireAmount: 2 },
+            { key: id2, desireAmount: 3 },
+          ],
+          fn,
+        ),
+      ).rejects.toThrow('failed');
+      expect(await cache.getHashCache(key, id)).toBe(0);
+      expect(await cache.getHashCache(key, id2)).toBe(0);
     });
   });
 

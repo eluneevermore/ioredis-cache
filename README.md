@@ -52,6 +52,8 @@ Compact redis cache using [ioredis](https://github.com/luin/ioredis).
 
 [#acquire](#acquire)
 
+[#acquireMany](#acquiremany)
+
 [#hashCache](#hashcache)
 
 [#getHashCache](#gethashcache)
@@ -67,6 +69,8 @@ Compact redis cache using [ioredis](https://github.com/luin/ioredis).
 [#deleteHashCache](#deletehashcache)
 
 [#hashAcquire](#hashacquire)
+
+[#hashAcquireMany](#hashacquiremany)
 
 
 ### `#constructor`
@@ -166,6 +170,33 @@ Increase the value of `key` by `amount` and pass it to `fn` function. If `fn` ra
 
 By default, `amount` is treate as an integer. Set `float = true` if `amount` is a float.
 
+### `#acquireMany`
+`acquireMany(items: AcquireDesire[], fn: (results: AcquiredResult[]) => any, options?: AcquireOptions)`
+
+Increase multiple keys with `INCRBY` and pass the acquired result list to `fn`.
+Set `options.float = true` to use `INCRBYFLOAT`. If an item has `limitAmount`,
+any amount above the limit is released before `fn` runs. If `fn` raises an
+exception, all acquired amounts are released.
+
+```typescript
+type AcquireDesire = {
+  key: string | number
+  desireAmount: number
+  limitAmount?: number
+}
+
+type AcquiredResult = {
+  key: string | number
+  acquiredAmount: number
+  lackingAmount: number
+}
+
+type AcquireOptions = {
+  prefix?: string
+  float?: boolean
+}
+```
+
 ### `#hashCache`
 `hashCache(key: string, id: string, callback: () => any): Promise<any>`
 
@@ -222,6 +253,12 @@ Delete the cached ids of the key from redis and return the deleted number
 Increase the value of `id` in `key` by `amount` and pass it to `fn` function. If `fn` raises any exception, decrease the value of `id` in `key` by `amount`.
 
 By default, `amount` is treated as an integer. Set `float = true` if `amount` is a float.
+
+### `#hashAcquireMany`
+`hashAcquireMany(key: string, items: AcquireDesire[], fn: (results: AcquiredResult[]) => any, options?: AcquireOptions)`
+
+Hash-based equivalent of `#acquireMany`. It increases multiple fields under one
+Redis hash key with `HINCRBY`, or `HINCRBYFLOAT` when `options.float = true`.
 
 ## Run tests
 
