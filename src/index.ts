@@ -1,5 +1,5 @@
-import Cache from './Cache'
+import Cache from './Cache';
 
-export default Cache
+export default Cache;
 
-module.exports = Cache
+module.exports = Cache;

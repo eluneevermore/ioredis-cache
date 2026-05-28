@@ -13,11 +13,11 @@ Compact redis cache using [ioredis](https://github.com/luin/ioredis).
 ## Installation
 
 ```
-  npm install ioredis-cache
+  npm install ioredis-cache ioredis
 ```
 
 ```
-  yarn add ioredis-cache
+  yarn add ioredis-cache ioredis
 ```
 
 ## Usage
@@ -28,13 +28,6 @@ Compact redis cache using [ioredis](https://github.com/luin/ioredis).
   const cache = new Cache(new Redis())
 
   const value = await cache.cache("key", async () => ({ foo: "bar" }))
-```
-
-## Notes
-
-Depends on your case, you may want to disconnect redis after using:
-```
-cache.redis.quit()
 ```
 
 ## APIs
@@ -79,11 +72,11 @@ cache.redis.quit()
 ### `#constructor`
 `constructor(args: Redis | CacheOptions)`
 
-You can initialize the cache from an ioredis object or with options.
+Initialize the cache with an existing ioredis instance.
 
 ```typescript
 interface CacheOptions {
-  redis: object | Redis
+  redis: Redis
   parser: Parser
 }
 
