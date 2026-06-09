@@ -1,233 +1,563 @@
-import Redis, { RedisKey, RedisOptions } from 'ioredis'
+import type Redis from 'ioredis';
+import type { RedisKey } from 'ioredis';
+import type { AcquiredResult, AcquireDesire, AcquireOptions } from './Acquire';
+import { Acquire } from './Acquire';
+import type { AcquireHelper } from './AcquireHelper';
+import { LuaAcquire } from './LuaAcquire';
 
+// TODO: type this without narrowing the public parser contract.
 interface Parser {
-  parse: (text: string) => any
-  stringify: (value: any) => string
+  parse: (text: string) => any;
+  stringify: (value: any) => string;
 }
 
 interface CacheOptions {
-  redis: RedisOptions | Redis
-  parser?: Parser
+  redis: Redis;
+  parser?: Parser;
+  acquire?: AcquireHelper;
+  acquireType?: AcquireType;
 }
 
-type Key = RedisKey
+type Key = RedisKey | number;
+type AcquireType = 'lua' | 'pipeline';
 
-type Map<T> = { [id: string]: T }
+type Mapping<T> = { [id: string]: T };
 
-type Awaitable<T> = T | Promise<T>
+type ValueSource<K extends Key, T> = Mapping<T> | T[] | Map<K, T>;
 
-const NOT_FOUND_VALUE = undefined
+type ValueMap<T> = Mapping<T | undefined>;
 
-const isRedis = (obj): boolean => {
-  if (obj == null) { return false }
-  return ['set', 'get', 'setex', 'mget', 'pipeline', 'del', 'hset', 'get', 'hdel'].every(name => typeof obj[name] === 'function')
-}
+type Awaitable<T> = T | Promise<T>;
+
+const NOT_FOUND_VALUE = undefined;
+
+type CacheReturn<T> = T | typeof NOT_FOUND_VALUE;
+
+const SET_PARAM_SIZE = 2;
+const INVALID_REDIS_INSTANCE_MESSAGE = 'Cache requires an ioredis instance';
+const DEFAULT_ACQUIRE_TYPE: AcquireType = 'lua';
+
+const REQUIRED_REDIS_COMMANDS = [
+  'set',
+  'get',
+  'setex',
+  'mget',
+  'pipeline',
+  'del',
+  'hset',
+  'get',
+  'hdel',
+];
+
+/**
+ * Type guard that checks if an object is an ioredis instance by verifying the
+ * presence of required Redis commands (set, get, setex, mget, pipeline, del,
+ * hset, hdel) as functions on the object.
+ */
+const isRedis = (obj: unknown): obj is Redis => {
+  if (obj === null || typeof obj !== 'object') {
+    return false;
+  }
+  const redis = obj as Record<string, unknown>;
+  return REQUIRED_REDIS_COMMANDS.every(
+    (name) => typeof redis[name] === 'function',
+  );
+};
 
 class Cache {
   redis: Redis;
+  private readonly acquireHelper: AcquireHelper;
   protected prefix: string;
   protected parser: Parser = JSON;
 
+  /**
+   * @param options - Either an ioredis instance directly or a CacheOptions object
+   *   with a `redis` property plus optional `parser`, `acquire`, and
+   *   `acquireType`. Throws if the redis instance doesn't satisfy the ioredis
+   *   interface check.
+   */
   constructor(options: Redis | CacheOptions) {
-    let config = (isRedis(options) ? { redis: options } : options) as CacheOptions
+    const config = (
+      isRedis(options) ? { redis: options } : options
+    ) as CacheOptions;
 
-    if (isRedis(config.redis)) {
-      this.redis = config.redis as Redis
-    } else {
-      this.redis = new Redis(config.redis as RedisOptions)
+    if (!isRedis(config.redis)) {
+      throw new TypeError(INVALID_REDIS_INSTANCE_MESSAGE);
     }
 
-    this.prefix = this.redis.options.keyPrefix || ''
+    this.redis = config.redis;
+    this.acquireHelper = this.createAcquireHelper(
+      config.acquire,
+      config.acquireType ?? DEFAULT_ACQUIRE_TYPE,
+    );
+    this.prefix = this.redis.options.keyPrefix || '';
     if (config.parser !== undefined) {
-      this.parser = config.parser
+      this.parser = config.parser;
     }
   }
 
+  private createAcquireHelper(
+    acquire: AcquireHelper | undefined,
+    acquireType: AcquireType,
+  ): AcquireHelper {
+    if (acquire !== undefined) {
+      return acquire;
+    }
+    if (acquireType === 'pipeline') {
+      return new Acquire(this.redis);
+    }
+    return new LuaAcquire(this.redis);
+  }
+
+  /**
+   * Binds all prototype methods of Cache to a target instance so they can be
+   * destructured and called without losing the `this` context.
+   *
+   * @returns The same target instance after binding.
+   */
   static bindAll(target: Cache): Cache {
+    const targetMethods = target as unknown as Record<string, unknown>;
     for (const name of Object.getOwnPropertyNames(Cache.prototype)) {
-      if (name === 'constructor') { continue }
-      target[name] = target[name].bind(target)
+      if (name === 'constructor') {
+        continue;
+      }
+      const method = targetMethods[name];
+      if (typeof method === 'function') {
+        targetMethods[name] = method.bind(target);
+      }
     }
-    return target
+    return target;
   }
 
+  /**
+   * Read-through cache for a single key. Checks the cache first; if the value
+   * is missing, calls `fn` to produce it, stores the result, and returns it.
+   *
+   * @param key - Cache key to look up.
+   * @param fn - Factory function invoked on cache miss.
+   * @param ttl - Optional TTL in seconds. If omitted the value is stored
+   *   without expiry.
+   */
   async cache<T>(key: Key, fn: () => Awaitable<T>, ttl?: number): Promise<T> {
-    let value = await this.getCache(key)
+    let value = await this.getCache<T>(key);
     if (value !== NOT_FOUND_VALUE) {
-      return value
+      return value;
     }
-    value = await fn()
-    await this.setCache(key, value, ttl)
-    return value
+    value = await fn();
+    if (value !== NOT_FOUND_VALUE) {
+      await this.setCache(key, value, ttl);
+    }
+    return value;
   }
 
-  async getCache(key: Key) {
-    const data = await this.redis.get(key)
-    return data ? this.parser.parse(data) : NOT_FOUND_VALUE
+  /**
+   * Retrieves a single cached value by key. Returns `undefined` when the key
+   * is not found (the `NOT_FOUND_VALUE` sentinel), making it safe to
+   * distinguish a cache miss from a stored value.
+   */
+  async getCache<T>(key: Key): Promise<CacheReturn<T>> {
+    const data = await this.redis.get(key as RedisKey);
+    return data === null ? NOT_FOUND_VALUE : this.parser.parse(data);
   }
 
+  /**
+   * Stores a single value in the cache. The value is serialized through the
+   * configured parser (default: JSON).
+   *
+   * @param ttl - Optional TTL in seconds. Uses `SETEX` when provided, plain
+   *   `SET` otherwise.
+   */
   async setCache(key: Key, value: any, ttl?: number) {
-    const data = this.parser.stringify(value)
-    return (ttl !== undefined ? this.redis.setex(key, ttl, data) : this.redis.set(key, data))
+    const data = this.parser.stringify(value);
+    return ttl !== undefined
+      ? this.redis.setex(key as RedisKey, ttl, data)
+      : this.redis.set(key as RedisKey, data);
   }
 
-  async manyCache<K extends Key, T>(keys: K[], fn: (keys: K[]) => Awaitable<Map<T> | T[]>, prefix: Key = '', ttl?: number): Promise<T[]> {
-    const fullKeys = keys.map(key => `${prefix}${key}`)
-    const cachedValues = await this.getManyCache(fullKeys)
-    const uncachedKeys: K[] = []
-    for (let i = 0; i < cachedValues.length; ++i) {
-      if (cachedValues[i] === NOT_FOUND_VALUE) { uncachedKeys.push(keys[i]) }
-    }
+  /**
+   * Read-through cache for multiple keys in a single batch. Executes a single
+   * `MGET` for all keys, then calls `fn` for any missing keys and stores the
+   * result via `MSET` (or pipelined `SETEX` when TTL is provided).
+   *
+   * @param keys - List of logical keys to fetch.
+   * @param fn - Factory invoked with the subset of keys that were not cached.
+   *   Must return values in the same order as the supplied keys.
+   * @param prefix - Optional string (or number) prepended to every key before
+   *   interacting with Redis. The prefix is stripped from cached results.
+   * @param ttl - Optional TTL in seconds for newly stored values.
+   */
+  async manyCache<K extends Key, T>(
+    keys: K[],
+    fn: (keys: K[]) => Awaitable<ValueSource<K, T>>,
+    prefix: Key = '',
+    ttl?: number,
+  ): Promise<T[]> {
+    const fullKeys = keys.map((key) => `${prefix}${key}`);
+    const cachedValues = await this.getManyCache<T>(fullKeys);
+    const uncachedKeys = this._getUncachedKeys(keys, cachedValues);
 
     if (uncachedKeys.length) {
-      const uncachedValues = await fn(uncachedKeys)
-      const uncachedValueMap = Array.isArray(uncachedValues)
-        ? uncachedKeys.reduce((c, key, idx) => Object.assign(c, { [key.toString()]: uncachedValues[idx] }), {})
-        : uncachedValues
-      const fullKeyUncachedValueMap = Object.entries(uncachedValueMap).reduce((c, [key, value]) =>
-        Object.assign(c, { [`${prefix}${key}`]: value }), {})
-      await this.setManyCache(fullKeyUncachedValueMap, ttl)
+      const uncachedValues = await fn(uncachedKeys);
+      const uncachedValueMap = this._buildValueMap(
+        uncachedKeys,
+        uncachedValues,
+      );
+      const fullKeyUncachedValueMap = this._prefixValueMap(
+        uncachedValueMap,
+        prefix,
+      );
+      await this.setManyCache(fullKeyUncachedValueMap, ttl);
 
-      for (let i = 0; i < cachedValues.length; ++i) {
-        if (cachedValues[i] === NOT_FOUND_VALUE) {
-          cachedValues[i] = uncachedValueMap[keys[i].toString()]
-        }
-      }
+      return this._mergeCacheValues(cachedValues, keys, uncachedValueMap);
     }
-    return cachedValues
+    return cachedValues as T[];
   }
 
-  async getManyCache(keys: Key[]): Promise<any[]> {
-    if (keys.length <= 0) { return [] }
-    let data = await this.redis.mget(keys)
-    data = data.map((e: string | null) => !e ? NOT_FOUND_VALUE : this.parser.parse(e))
-    return data
+  /**
+   * Retrieves multiple cached values by their keys using `MGET`. Returns an
+   * array aligned with the input keys where missing entries are `undefined`
+   * (the `NOT_FOUND_VALUE` sentinel).
+   */
+  async getManyCache<T = any>(keys: Key[]): Promise<CacheReturn<T>[]> {
+    if (keys.length <= 0) {
+      return [];
+    }
+    const data = await this.redis.mget(keys as RedisKey[]);
+    return data.map((e: string | null) =>
+      e === null ? NOT_FOUND_VALUE : this.parser.parse(e),
+    );
   }
 
+  /**
+   * Stores multiple key-value pairs atomically. Uses `MSET` when no TTL is
+   * given; otherwise uses a pipeline of `MSET` + per-key `EXPIRE` commands.
+   *
+   * @param valueMap - A plain object mapping string keys to serialisable values.
+   * @param ttl - Optional TTL in seconds applied to every key in the batch.
+   */
   async setManyCache(valueMap: { [id: string]: any }, ttl?: number) {
-    const keys = Object.keys(valueMap)
-    if (keys.length <= 0) { return [] }
-    const params = this._buildSetParams(valueMap)
-    if (ttl === undefined) { return this.redis.mset(params) }
-    const pipeline = this.redis.pipeline()
-    pipeline.mset(params)
-    for (const key of keys) { pipeline.expire(key, ttl) }
-    return pipeline.exec()
+    const params = this._buildSetParams(valueMap);
+    if (params.length <= 0) {
+      return [];
+    }
+    if (ttl === undefined) {
+      return this.redis.mset(params);
+    }
+    const pipeline = this.redis.pipeline();
+    pipeline.mset(params);
+    for (let i = 0; i < params.length; i += SET_PARAM_SIZE) {
+      const key = params[i];
+      pipeline.expire(key, ttl);
+    }
+    return pipeline.exec();
   }
 
+  /**
+   * Deletes one or more keys from the cache.
+   *
+   * @returns The number of keys that were actually removed.
+   */
   async deleteCache(...keys: Key[]): Promise<number> {
-    return this.redis.del(...keys)
+    return this.redis.del(...(keys as RedisKey[]));
   }
 
+  /**
+   * Deletes all keys matching a glob pattern by iterating with `SCAN` in
+   * batches. The `keyPrefix` configured on the ioredis instance is
+   * automatically prepended to the pattern so callers don't need to include it.
+   *
+   * @param pattern - Redis glob pattern (e.g. `user:*`).
+   * @param batch - Number of keys to scan and delete per pipeline (default 100).
+   */
   async deletePattern(pattern: string, batch: number = 100): Promise<void> {
-    const jobs: any[] = []
-    const length = this.prefix.length
-    let pipeline = this.redis.pipeline()
-    for await (const keys of this.redis.scanStream({ match: `${this.prefix}${pattern}`, count: batch })) {
+    const jobs: any[] = [];
+    const length = this.prefix.length;
+    let pipeline = this.redis.pipeline();
+    for await (const keys of this.redis.scanStream({
+      match: `${this.prefix}${pattern}`,
+      count: batch,
+    })) {
       for (const key of keys) {
-        pipeline.del(key.substring(length))
+        pipeline.del(key.substring(length));
       }
       if (pipeline.length >= batch) {
-        jobs.push(pipeline.exec())
-        pipeline = this.redis.pipeline()
+        jobs.push(pipeline.exec());
+        pipeline = this.redis.pipeline();
       }
     }
-    jobs.push(pipeline.exec())
-    await Promise.all(jobs)
+    jobs.push(pipeline.exec());
+    await Promise.all(jobs);
   }
 
+  /**
+   * Read-through cache for a single field inside a Redis hash. Checks the hash
+   * first; on miss calls `fn`, stores the result, and returns it.
+   *
+   * @param key - The Redis hash key.
+   * @param id - The field name within the hash.
+   * @param fn - Factory function invoked on cache miss.
+   */
   async hashCache<T>(key: Key, id: Key, fn: () => Awaitable<T>): Promise<T> {
-    let value = await this.getHashCache(key, id)
+    let value = await this.getHashCache<T>(key, id);
     if (value !== NOT_FOUND_VALUE) {
-      return value
+      return value;
     }
-    value = await fn()
-    await this.setHashCache(key, id, value)
-    return value
-  }
-
-  async getHashCache(key: Key, id: Key) {
-    const data = await this.redis.hget(key, id)
-    return data ? this.parser.parse(data) : NOT_FOUND_VALUE
-  }
-
-  async setHashCache(key: Key, id: Key, value: any): Promise<number> {
-    const data = this.parser.stringify(value)
-    return this.redis.hset(key, id, data)
-  }
-
-  async hashManyCache<K extends Key, T>(key: Key, ids: K[], fn: (ids: K[]) => Awaitable<Map<T> | T[]>): Promise<T[]> {
-    const cachedValues = await this.getHashManyCache(key, ids)
-    const uncachedIds: K[] = []
-    for (let i = 0; i < cachedValues.length; ++i) {
-      if (cachedValues[i] === NOT_FOUND_VALUE) { uncachedIds.push(ids[i]) }
+    value = await fn();
+    if (value !== NOT_FOUND_VALUE) {
+      await this.setHashCache(key, id, value);
     }
+    return value;
+  }
+
+  /**
+   * Retrieves a single field from a Redis hash. Returns `undefined` (the
+   * `NOT_FOUND_VALUE` sentinel) when the field does not exist.
+   */
+  async getHashCache<T>(key: Key, id: Key): Promise<CacheReturn<T>> {
+    const data = await this.redis.hget(key as RedisKey, id as RedisKey);
+    return data === null ? NOT_FOUND_VALUE : this.parser.parse(data);
+  }
+
+  /**
+   * Stores a single field in a Redis hash. The value is serialised through the
+   * configured parser.
+   */
+  async setHashCache(key: Key, id: Key, value: any) {
+    const data = this.parser.stringify(value);
+    return this.redis.hset(key as RedisKey, id, data);
+  }
+
+  /**
+   * Read-through cache for multiple fields within a single Redis hash. Issues
+   * a single `HMGET`, calls `fn` for any missing fields, persists them with
+   * `HMSET`, and returns the merged result aligned with the input `ids`.
+   *
+   * @param key - The Redis hash key.
+   * @param ids - Field names to fetch.
+   * @param fn - Factory invoked with the subset of field names that are not
+   *   cached. Must return values in the same order.
+   */
+  async hashManyCache<K extends Key, T>(
+    key: Key,
+    ids: K[],
+    fn: (ids: K[]) => Awaitable<ValueSource<K, T>>,
+  ): Promise<T[]> {
+    const cachedValues = await this.getHashManyCache<T>(key, ids);
+    const uncachedIds = this._getUncachedKeys(ids, cachedValues);
 
     if (uncachedIds.length) {
-      const uncachedValues = await fn(uncachedIds)
-      const uncachedValueMap = Array.isArray(uncachedValues)
-        ? uncachedIds.reduce((c, key, idx) => Object.assign(c, { [key.toString()]: uncachedValues[idx] }), {})
-        : uncachedValues
-      await this.setHashManyCache(key, uncachedValueMap)
-      for (let i = 0; i < cachedValues.length; ++i) {
-        if (cachedValues[i] === NOT_FOUND_VALUE) {
-          cachedValues[i] = uncachedValueMap[ids[i].toString()]
-        }
-      }
+      const uncachedValues = await fn(uncachedIds);
+      const uncachedValueMap = this._buildValueMap(uncachedIds, uncachedValues);
+      await this.setHashManyCache(key, uncachedValueMap);
+      return this._mergeCacheValues(cachedValues, ids, uncachedValueMap);
     }
-    return cachedValues
+    return cachedValues as T[];
   }
 
-  async getHashManyCache(key: Key, ids: Key[]): Promise<any[]> {
-    if (ids.length <= 0) { return [] }
-    let data = await this.redis.hmget(key, ...ids)
-    data = data.map((e: string | null) => !e ? NOT_FOUND_VALUE : this.parser.parse(e))
-    return data
+  /**
+   * Retrieves multiple fields from a Redis hash using `HMGET`. Returns an
+   * array aligned with the input `ids` where missing fields are `undefined`
+   * (the `NOT_FOUND_VALUE` sentinel).
+   */
+  async getHashManyCache<T>(key: Key, ids: Key[]): Promise<CacheReturn<T>[]> {
+    if (ids.length <= 0) {
+      return [];
+    }
+    const data = await this.redis.hmget(
+      key as RedisKey,
+      ...(ids as RedisKey[]),
+    );
+    return data.map((e: string | null) =>
+      e === null ? NOT_FOUND_VALUE : this.parser.parse(e),
+    );
   }
 
-  async setHashManyCache(key: Key, valueMap: { [id: string]: any; }) {
-    if (Object.keys(valueMap).length <= 0) { return [] }
-    const params = this._buildSetParams(valueMap)
-    return this.redis.hmset(key, params)
+  /**
+   * Stores multiple fields in a Redis hash atomically using `HMSET`.
+   *
+   * @param key - The Redis hash key.
+   * @param valueMap - A plain object mapping field names to serialisable values.
+   */
+  async setHashManyCache(key: Key, valueMap: { [id: string]: any }) {
+    const params = this._buildSetParams(valueMap);
+    if (params.length <= 0) {
+      return [];
+    }
+    return this.redis.hmset(key as RedisKey, params);
   }
 
+  /**
+   * Deletes one or more fields from a Redis hash.
+   *
+   * @returns The number of fields that were actually removed.
+   */
   async deleteHashCache(key: Key, ...ids: Key[]): Promise<number> {
-    return this.redis.hdel(key, ...ids)
+    return this.redis.hdel(key as RedisKey, ...(ids as RedisKey[]));
   }
 
-  async acquire<T>(key: Key, amount: number, fn: (current: number) => Awaitable<T>, float: boolean = false): Promise<T> {
-    const change = (float ? this.redis.incrbyfloat : this.redis.incrby) as (key: Key, amount: number) => Promise<number>
-    const parser: (value: any) => number = float ? parseFloat : parseInt
-    try {
-      const current = await change.call(this.redis, key, amount)
-      const result = await fn(parser(current))
-      return result
-    } catch (error) {
-      const n = await change.call(this.redis, key, -amount)
-      throw error
-    }
+  /**
+   * Atomically increments (or decrements) a Redis key and invokes `fn` with
+   * the updated value. On failure the increment is automatically rolled back.
+   *
+   * @param key - Redis key holding the counter.
+   * @param amount - Amount to add (use a negative number to decrement).
+   * @param fn - Callback receiving current, acquired, and lacking amounts.
+   * @param options - When `float` is true uses `INCRBYFLOAT`; `limit` caps
+   *   how much can be acquired.
+   */
+  async acquire<T>(
+    key: Key,
+    amount: number,
+    fn: (
+      currentAmount: number,
+      acquiredAmount: number,
+      lackingAmount: number,
+    ) => Awaitable<T>,
+    options?: AcquireOptions | boolean,
+  ): Promise<T> {
+    return this.acquireHelper.acquire(key, amount, fn, options);
   }
 
-  async hashAcquire<T>(key: Key, id: Key, amount: number, fn: (current: number) => Awaitable<T>, float: boolean = false): Promise<T> {
-    const change = (float ? this.redis.hincrbyfloat : this.redis.hincrby) as (key: Key, id: Key, amount: string | number) => Promise<string>
-    const parser: (value: any) => number = float ? parseFloat : parseInt
-    try {
-      const current = await change.call(this.redis, key, id, amount)
-      const result = await fn(parser(current))
-      return result
-    } catch (error) {
-      await change.call(this.redis, key, id, -amount)
-      throw error
-    }
+  /**
+   * Atomically increments (or decrements) a field inside a Redis hash and
+   * invokes `fn` with the updated value.
+   *
+   * @param key - The Redis hash key.
+   * @param id - The field name within the hash.
+   * @param amount - Amount to add.
+   * @param fn - Callback receiving current, acquired, and lacking amounts.
+   * @param options - When `float` is true uses `HINCRBYFLOAT`; `limit` caps
+   *   how much can be acquired.
+   */
+  async hashAcquire<T>(
+    key: Key,
+    id: Key,
+    amount: number,
+    fn: (
+      currentAmount: number,
+      acquiredAmount: number,
+      lackingAmount: number,
+    ) => Awaitable<T>,
+    options?: AcquireOptions | boolean,
+  ): Promise<T> {
+    return this.acquireHelper.hashAcquire(key, id, amount, fn, options);
   }
 
-  protected _buildSetParams = (valueMap: { [id: string]: any; }) => {
-    const params: string[] = []
-    for (let [key, value] of Object.entries(valueMap)) {
-      params.push(key, this.parser.stringify(value))
+  /**
+   * Atomically modifies multiple counters through the configured acquire
+   * helper. Each desired change is specified as an `AcquireDesire` item; `fn`
+   * receives the final values.
+   */
+  async acquireMany<K extends string | number, T>(
+    items: AcquireDesire<K>[],
+    fn: (acquireResult: AcquiredResult<K>[]) => Awaitable<T>,
+    options?: AcquireOptions,
+  ): Promise<T> {
+    return this.acquireHelper.acquireMany(items, fn, options);
+  }
+
+  /**
+   * Atomically modifies multiple fields inside a single Redis hash counter
+   * through the configured acquire helper.
+   *
+   * @param hashKey - The Redis hash key containing the counters.
+   * @param items - Desired changes for each field.
+   * @param fn - Callback receiving the array of results.
+   */
+  async hashAcquireMany<K extends string | number, T>(
+    hashKey: string,
+    items: AcquireDesire<K>[],
+    fn: (acquireResult: AcquiredResult<K>[]) => Awaitable<T>,
+    options?: AcquireOptions,
+  ): Promise<T> {
+    return this.acquireHelper.hashAcquireMany(hashKey, items, fn, options);
+  }
+
+  /**
+   * Filters the input `keys` down to those whose corresponding entry in
+   * `cachedValues` is `NOT_FOUND_VALUE`.
+   */
+  protected _getUncachedKeys<K extends Key, T>(
+    keys: K[],
+    cachedValues: CacheReturn<T>[],
+  ): K[] {
+    return keys.filter((_, index) => cachedValues[index] === NOT_FOUND_VALUE);
+  }
+
+  /**
+   * Merges a set of cached values with a map of uncached values. Where a
+   * cached entry is `NOT_FOUND_VALUE`, the corresponding value is looked up
+   * from `uncachedValueMap` by key.
+   */
+  protected _mergeCacheValues<K extends Key, T>(
+    cachedValues: CacheReturn<T>[],
+    keys: K[],
+    uncachedValueMap: ValueMap<T>,
+  ): T[] {
+    return cachedValues.map((value, index) => {
+      if (value !== NOT_FOUND_VALUE) {
+        return value as T;
+      }
+      return uncachedValueMap[String(keys[index])] as T;
+    });
+  }
+
+  /**
+   * Returns a new map with every key prefixed by `prefix`. Used internally
+   * by `manyCache` to apply the configured prefix before storing.
+   */
+  protected _prefixValueMap<T>(
+    valueMap: ValueMap<T>,
+    prefix: Key,
+  ): ValueMap<T> {
+    const prefixedMap: ValueMap<T> = {};
+    for (const [key, value] of Object.entries(valueMap)) {
+      prefixedMap[`${prefix}${key}`] = value;
     }
-    return params
+    return prefixedMap;
+  }
+
+  /**
+   * Converts a value map into a flat array of `[key, stringifiedValue, key,
+   * stringifiedValue, ...]` suitable for `MSET` / `HMSET`. Entries whose
+   * value is `NOT_FOUND_VALUE` are skipped.
+   */
+  protected _buildSetParams = (valueMap: { [id: string]: any }): string[] => {
+    const params: string[] = [];
+    for (const [key, value] of Object.entries(valueMap)) {
+      if (value === NOT_FOUND_VALUE) {
+        continue;
+      }
+      params.push(key, this.parser.stringify(value));
+    }
+    return params;
+  };
+
+  /**
+   * Normalises a `ValueSource` (array, `Map`, or plain object) into a uniform
+   * `ValueMap` keyed by the string representation of each id. Array and `Map`
+   * sources are aligned with `ids` by position.
+   */
+  protected _buildValueMap<K extends Key, T>(
+    ids: K[],
+    valueMap: ValueSource<K, T>,
+  ): ValueMap<T> {
+    if (Array.isArray(valueMap)) {
+      return ids.reduce<ValueMap<T>>((cacheMap, id, index) => {
+        cacheMap[String(id)] = valueMap[index];
+        return cacheMap;
+      }, {});
+    }
+
+    if (valueMap instanceof Map) {
+      return ids.reduce<ValueMap<T>>((cacheMap, id) => {
+        cacheMap[String(id)] = valueMap.get(id);
+        return cacheMap;
+      }, {});
+    }
+
+    return valueMap;
   }
 }
 
-export default Cache
+export default Cache;
