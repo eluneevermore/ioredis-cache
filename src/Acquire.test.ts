@@ -22,12 +22,34 @@ describe("Acquire", () => {
     it("supports float increments", async () => {
       const { acquire, redis } = createAcquire();
 
-      const result = await acquire.acquire("ticket", 1.5, (current) => {
-        return current;
-      }, true);
+      const result = await acquire.acquire(
+        "ticket",
+        1.5,
+        (current, acquired, lacking) => {
+          expect(acquired).toBe(1.5);
+          expect(lacking).toBe(0);
+          return current;
+        },
+        { float: true },
+      );
 
       expect(result).toBe(1.5);
       expect(redis.getNumber("ticket")).toBe(1.5);
+    });
+
+    it("supports limit options", async () => {
+      const { acquire, redis } = createAcquire();
+      redis.setValue("ticket", 8);
+
+      const result = await acquire.acquire(
+        "ticket",
+        5,
+        (current, acquired, lacking) => ({ current, acquired, lacking }),
+        { limit: 10 },
+      );
+
+      expect(result).toEqual({ current: 10, acquired: 2, lacking: 3 });
+      expect(redis.getNumber("ticket")).toBe(10);
     });
   });
 
@@ -39,12 +61,32 @@ describe("Acquire", () => {
         TEST_HASH_KEY,
         "ticket",
         1.5,
-        (current) => current,
-        true,
+        (current, acquired, lacking) => {
+          expect(acquired).toBe(1.5);
+          expect(lacking).toBe(0);
+          return current;
+        },
+        { float: true },
       );
 
       expect(result).toBe(1.5);
       expect(redis.getHashNumber(TEST_HASH_KEY, "ticket")).toBe(1.5);
+    });
+
+    it("supports hash limit options", async () => {
+      const { acquire, redis } = createAcquire();
+      redis.setHashValue(TEST_HASH_KEY, "ticket", 8);
+
+      const result = await acquire.hashAcquire(
+        TEST_HASH_KEY,
+        "ticket",
+        5,
+        (current, acquired, lacking) => ({ current, acquired, lacking }),
+        { limit: 10 },
+      );
+
+      expect(result).toEqual({ current: 10, acquired: 2, lacking: 3 });
+      expect(redis.getHashNumber(TEST_HASH_KEY, "ticket")).toBe(10);
     });
   });
 
@@ -71,7 +113,12 @@ describe("Acquire", () => {
       );
 
       expect(result).toEqual([
-        { key: "ticket", acquiredAmount: 2, lackingAmount: 0 },
+        {
+          key: "ticket",
+          currentAmount: 2,
+          acquiredAmount: 2,
+          lackingAmount: 0,
+        },
       ]);
       expect(redis.getNumber(`${TEST_PREFIX}ticket`)).toBe(2);
       expect(redis.getRawValue("ticket")).toBeUndefined();
@@ -86,7 +133,12 @@ describe("Acquire", () => {
       );
 
       expect(result).toEqual([
-        { key: "ticket", acquiredAmount: 2, lackingAmount: 0 },
+        {
+          key: "ticket",
+          currentAmount: 2,
+          acquiredAmount: 2,
+          lackingAmount: 0,
+        },
       ]);
       expect(redis.getNumber("ticket")).toBe(2);
       expect(redis.pipelineCount).toBe(1);
@@ -103,7 +155,12 @@ describe("Acquire", () => {
       );
 
       expect(result).toEqual([
-        { key: "ticket", acquiredAmount: 2, lackingAmount: 0 },
+        {
+          key: "ticket",
+          currentAmount: 10,
+          acquiredAmount: 2,
+          lackingAmount: 0,
+        },
       ]);
       expect(redis.getNumber(`${TEST_PREFIX}ticket`)).toBe(10);
       expect(redis.pipelineCount).toBe(1);
@@ -123,7 +180,12 @@ describe("Acquire", () => {
       );
 
       expect(result).toEqual([
-        { key: "ticket", acquiredAmount: 2, lackingAmount: 3 },
+        {
+          key: "ticket",
+          currentAmount: 10,
+          acquiredAmount: 2,
+          lackingAmount: 3,
+        },
       ]);
       expect(redis.getNumber(`${TEST_PREFIX}ticket`)).toBe(10);
       expect(redis.pipelineCount).toBe(2);
@@ -140,9 +202,33 @@ describe("Acquire", () => {
       );
 
       expect(result).toEqual([
-        { key: "ticket", acquiredAmount: 0.5, lackingAmount: 0.75 },
+        {
+          key: "ticket",
+          currentAmount: 2,
+          acquiredAmount: 0.5,
+          lackingAmount: 0.75,
+        },
       ]);
       expect(redis.getNumber("ticket")).toBe(2);
+    });
+
+    it("rejects non-finite float amounts before creating a pipeline", async () => {
+      const { acquire, redis } = createAcquire();
+      redis.setValue("ticket", 4);
+
+      await expect(
+        acquire.acquireMany(
+          [
+            { key: "ticket", desireAmount: 2 },
+            { key: "bonus", desireAmount: Number.NaN },
+          ],
+          (acquiredResults) => acquiredResults,
+          { float: true },
+        ),
+      ).rejects.toThrow("Acquire amounts must be finite numbers");
+      expect(redis.getNumber("ticket")).toBe(4);
+      expect(redis.getRawValue("bonus")).toBeUndefined();
+      expect(redis.pipelineCount).toBe(0);
     });
 
     it("rolls back acquired amount when callback fails", async () => {
@@ -155,7 +241,12 @@ describe("Acquire", () => {
           [{ key: "ticket", desireAmount: 2, limitAmount: 10 }],
           (acquiredResults) => {
             expect(acquiredResults).toEqual([
-              { key: "ticket", acquiredAmount: 2, lackingAmount: 0 },
+              {
+                key: "ticket",
+                currentAmount: 8,
+                acquiredAmount: 2,
+                lackingAmount: 0,
+              },
             ]);
             expect(redis.getNumber(`${TEST_PREFIX}ticket`)).toBe(8);
             throw expectedError;
@@ -305,7 +396,12 @@ describe("Acquire", () => {
       );
 
       expect(result).toEqual([
-        { key: "ticket", acquiredAmount: 2, lackingAmount: 0 },
+        {
+          key: "ticket",
+          currentAmount: 2,
+          acquiredAmount: 2,
+          lackingAmount: 0,
+        },
       ]);
       expect(redis.getHashNumber(`${TEST_PREFIX}${TEST_HASH_KEY}`, "ticket"))
         .toBe(2);
@@ -329,7 +425,12 @@ describe("Acquire", () => {
       );
 
       expect(result).toEqual([
-        { key: "ticket", acquiredAmount: 2, lackingAmount: 3 },
+        {
+          key: "ticket",
+          currentAmount: 10,
+          acquiredAmount: 2,
+          lackingAmount: 3,
+        },
       ]);
       expect(redis.getHashNumber(`${TEST_PREFIX}${TEST_HASH_KEY}`, "ticket"))
         .toBe(10);
@@ -347,9 +448,34 @@ describe("Acquire", () => {
       );
 
       expect(result).toEqual([
-        { key: "ticket", acquiredAmount: 0.5, lackingAmount: 0.75 },
+        {
+          key: "ticket",
+          currentAmount: 2,
+          acquiredAmount: 0.5,
+          lackingAmount: 0.75,
+        },
       ]);
       expect(redis.getHashNumber(TEST_HASH_KEY, "ticket")).toBe(2);
+    });
+
+    it("rejects non-finite float hash amounts before creating a pipeline", async () => {
+      const { acquire, redis } = createAcquire();
+      redis.setHashValue(TEST_HASH_KEY, "ticket", 4);
+
+      await expect(
+        acquire.hashAcquireMany(
+          TEST_HASH_KEY,
+          [
+            { key: "ticket", desireAmount: 2 },
+            { key: "bonus", desireAmount: Number.POSITIVE_INFINITY },
+          ],
+          (acquiredResults) => acquiredResults,
+          { float: true },
+        ),
+      ).rejects.toThrow("Acquire amounts must be finite numbers");
+      expect(redis.getHashNumber(TEST_HASH_KEY, "ticket")).toBe(4);
+      expect(redis.getHashRawValue(TEST_HASH_KEY, "bonus")).toBeUndefined();
+      expect(redis.pipelineCount).toBe(0);
     });
 
     it("rolls back acquired hash amount when callback fails", async () => {
@@ -363,7 +489,12 @@ describe("Acquire", () => {
           [{ key: "ticket", desireAmount: 2, limitAmount: 10 }],
           (acquiredResults) => {
             expect(acquiredResults).toEqual([
-              { key: "ticket", acquiredAmount: 2, lackingAmount: 0 },
+              {
+                key: "ticket",
+                currentAmount: 8,
+                acquiredAmount: 2,
+                lackingAmount: 0,
+              },
             ]);
             expect(
               redis.getHashNumber(`${TEST_PREFIX}${TEST_HASH_KEY}`, "ticket"),

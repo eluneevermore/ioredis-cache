@@ -79,9 +79,25 @@ Compact redis cache using [ioredis](https://github.com/luin/ioredis).
 Initialize the cache with an existing ioredis instance.
 
 ```typescript
+import type {
+  AcquiredResult,
+  AcquireDesire,
+  AcquireHelper,
+  AcquireOptions,
+} from 'ioredis-cache'
+
 interface CacheOptions {
   redis: Redis
   parser: Parser
+  acquire?: AcquireHelper
+  acquireType?: "lua" | "pipeline"
+}
+
+interface AcquireHelper {
+  acquire(key, amount, fn, options?)
+  hashAcquire(key, id, amount, fn, options?)
+  acquireMany(items, fn, options?)
+  hashAcquireMany(hashKey, items, fn, options?)
 }
 
 interface Parser { // Parse/unparse object when store in redis. Default is JSON
@@ -89,6 +105,12 @@ interface Parser { // Parse/unparse object when store in redis. Default is JSON
   stringify: (value: any) => string
 }
 ```
+
+`acquireType` controls the implementation used by `acquire`, `hashAcquire`,
+`acquireMany`, and `hashAcquireMany`. It defaults to `"lua"` for atomic
+multi-acquire behavior. Use `"pipeline"` to use the non-Lua pipeline
+implementation. Pass `acquire` to provide a custom helper object; it takes
+precedence over `acquireType`.
 
 ### `#cache`
 `cache(key: string, callback: async (key: string) => any, ttl?: number): Promise<any>`
@@ -164,11 +186,18 @@ deletePattern('post:*')
 Remove all cached keys start with `"post:*"`.
 
 ### `#acquire`
-`acquire(key: string, amount: number, fn: (current: number) => any, float: boolean = false)`
+`acquire(key: string, amount: number, fn: (current: number, acquired: number, lacking: number) => any, options?: AcquireOptions)`
 
-Increase the value of `key` by `amount` and pass it to `fn` function. If `fn` raises any exception, decrease the value of the `key` by `amount`.
+Increase the value of `key` by `amount` and pass the current, acquired, and
+lacking amounts to `fn`. If `fn` raises any exception, decrease the value of
+the `key` by the acquired amount.
 
-By default, `amount` is treate as an integer. Set `float = true` if `amount` is a float.
+By default, `amount` is treated as an integer. Set `options.float = true` or
+pass `true` as the fourth argument if `amount` is a float. Set `options.limit`
+to cap the final counter value.
+
+`limit` is intended for positive acquire amounts. Negative amounts decrement
+the counter, but `limit` does not provide a lower bound for decrements.
 
 ### `#acquireMany`
 `acquireMany(items: AcquireDesire[], fn: (results: AcquiredResult[]) => any, options?: AcquireOptions)`
@@ -177,6 +206,10 @@ Increase multiple keys with `INCRBY` and pass the acquired result list to `fn`.
 Set `options.float = true` to use `INCRBYFLOAT`. If an item has `limitAmount`,
 any amount above the limit is released before `fn` runs. If `fn` raises an
 exception, all acquired amounts are released.
+
+`limitAmount` is intended for positive `desireAmount` values. Negative
+`desireAmount` values decrement counters, but `limitAmount` does not provide a
+lower bound for decrements.
 
 ```typescript
 type AcquireDesire = {
@@ -187,6 +220,7 @@ type AcquireDesire = {
 
 type AcquiredResult = {
   key: string | number
+  currentAmount: number
   acquiredAmount: number
   lackingAmount: number
 }
@@ -194,6 +228,7 @@ type AcquiredResult = {
 type AcquireOptions = {
   prefix?: string
   float?: boolean
+  limit?: number
 }
 ```
 
@@ -248,17 +283,27 @@ Store the values with the corresponding ids of the key in redis
 Delete the cached ids of the key from redis and return the deleted number
 
 ### `#hashAcquire`
-`hashAcquire(key: string, id: string, amount: number, fn: (current: number) => any, float: boolean = false)`
+`hashAcquire(key: string, id: string, amount: number, fn: (current: number, acquired: number, lacking: number) => any, options?: AcquireOptions)`
 
-Increase the value of `id` in `key` by `amount` and pass it to `fn` function. If `fn` raises any exception, decrease the value of `id` in `key` by `amount`.
+Increase the value of `id` in `key` by `amount` and pass the current,
+acquired, and lacking amounts to `fn`. If `fn` raises any exception, decrease
+the value of `id` in `key` by the acquired amount.
 
-By default, `amount` is treated as an integer. Set `float = true` if `amount` is a float.
+By default, `amount` is treated as an integer. Set `options.float = true` or
+pass `true` as the fourth argument if `amount` is a float. Set `options.limit`
+to cap the final field value.
+
+`limit` is intended for positive acquire amounts. Negative amounts decrement
+the field, but `limit` does not provide a lower bound for decrements.
 
 ### `#hashAcquireMany`
 `hashAcquireMany(key: string, items: AcquireDesire[], fn: (results: AcquiredResult[]) => any, options?: AcquireOptions)`
 
 Hash-based equivalent of `#acquireMany`. It increases multiple fields under one
 Redis hash key with `HINCRBY`, or `HINCRBYFLOAT` when `options.float = true`.
+`limitAmount` is intended for positive `desireAmount` values. Negative
+`desireAmount` values decrement fields, but `limitAmount` does not provide a
+lower bound for decrements.
 
 ## Run tests
 

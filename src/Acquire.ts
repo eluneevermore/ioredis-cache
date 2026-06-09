@@ -30,6 +30,7 @@ const HASH_RELEASE_AFTER_CALLBACK_FAILED_MESSAGE =
   "Failed to release acquired hash amounts after acquire callback failed";
 const DEFAULT_PREFIX = "";
 const INTEGER_RADIX = 10;
+const NON_FINITE_AMOUNT_MESSAGE = "Acquire amounts must be finite numbers";
 
 export class AcquireFailedError extends Error {
   readonly cause?: unknown;
@@ -61,6 +62,7 @@ export type AcquireDesire<K extends string | number> = {
 
 export type AcquiredResult<K extends string | number> = {
   key: K;
+  currentAmount: number;
   acquiredAmount: number;
   lackingAmount: number;
 };
@@ -68,7 +70,10 @@ export type AcquiredResult<K extends string | number> = {
 export type AcquireOptions = {
   prefix?: string;
   float?: boolean;
+  limit?: number;
 };
+
+export type AcquireOptionsInput = AcquireOptions | boolean;
 
 export type ReleaseItem<K extends string | number> = {
   key: K;
@@ -81,16 +86,39 @@ export class Acquire {
   async acquire<T>(
     key: Key,
     amount: number,
-    fn: (current: number) => Awaitable<T>,
-    float: boolean = false,
+    fn: (
+      currentAmount: number,
+      acquiredAmount: number,
+      lackingAmount: number,
+    ) => Awaitable<T>,
+    options?: AcquireOptionsInput,
   ): Promise<T> {
+    const normalizedOptions = normalizeAcquireOptions(options);
+    assertFiniteAmount(amount);
+    assertFiniteLimit(normalizedOptions.limit);
+    const float = normalizedOptions.float === true;
     const change = this.getChangeCommand(float);
     const parse = float ? parseFloatValue : parseIntegerValue;
+    let rollbackAmount = amount;
     try {
-      const current = await change(key, amount);
-      return await fn(parse(current));
+      const newAmount = parse(await change(key, amount));
+      const acquireResult = this.getAcquiredResult(
+        {
+          key: String(key),
+          desireAmount: amount,
+          limitAmount: normalizedOptions.limit,
+        },
+        newAmount,
+      );
+      await this.releaseSingleLackingAmount(key, acquireResult, change);
+      rollbackAmount = acquireResult.acquiredAmount;
+      return await fn(
+        acquireResult.currentAmount,
+        acquireResult.acquiredAmount,
+        acquireResult.lackingAmount,
+      );
     } catch (error) {
-      await change(key, -amount);
+      await change(key, -rollbackAmount);
       throw error;
     }
   }
@@ -99,16 +127,39 @@ export class Acquire {
     key: Key,
     id: Key,
     amount: number,
-    fn: (current: number) => Awaitable<T>,
-    float: boolean = false,
+    fn: (
+      currentAmount: number,
+      acquiredAmount: number,
+      lackingAmount: number,
+    ) => Awaitable<T>,
+    options?: AcquireOptionsInput,
   ): Promise<T> {
+    const normalizedOptions = normalizeAcquireOptions(options);
+    assertFiniteAmount(amount);
+    assertFiniteLimit(normalizedOptions.limit);
+    const float = normalizedOptions.float === true;
     const change = this.getHashChangeCommand(float);
     const parse = float ? parseFloatValue : parseIntegerValue;
+    let rollbackAmount = amount;
     try {
-      const current = await change(key, id, amount);
-      return await fn(parse(current));
+      const newAmount = parse(await change(key, id, amount));
+      const acquireResult = this.getAcquiredResult(
+        {
+          key: String(id),
+          desireAmount: amount,
+          limitAmount: normalizedOptions.limit,
+        },
+        newAmount,
+      );
+      await this.releaseSingleHashLackingAmount(key, id, acquireResult, change);
+      rollbackAmount = acquireResult.acquiredAmount;
+      return await fn(
+        acquireResult.currentAmount,
+        acquireResult.acquiredAmount,
+        acquireResult.lackingAmount,
+      );
     } catch (error) {
-      await change(key, id, -amount);
+      await change(key, id, -rollbackAmount);
       throw error;
     }
   }
@@ -118,6 +169,7 @@ export class Acquire {
     fn: (acquireResult: AcquiredResult<K>[]) => Awaitable<T>,
     options?: AcquireOptions,
   ): Promise<T> {
+    assertFiniteItems(items);
     const prefix = options?.prefix ?? DEFAULT_PREFIX;
     return this.acquireBy(
       items,
@@ -134,6 +186,7 @@ export class Acquire {
     fn: (acquireResult: AcquiredResult<K>[]) => Awaitable<T>,
     options?: AcquireOptions,
   ): Promise<T> {
+    assertFiniteItems(items);
     const redisKey = `${options?.prefix ?? DEFAULT_PREFIX}${hashKey}`;
     return this.acquireBy(
       items,
@@ -326,6 +379,29 @@ export class Acquire {
     await releaseAcquired(lackingItems);
   }
 
+  private async releaseSingleLackingAmount<K extends string | number>(
+    key: Key,
+    acquireResult: AcquiredResult<K>,
+    change: (key: Key, amount: number) => Promise<NumericValue>,
+  ): Promise<void> {
+    if (acquireResult.lackingAmount <= 0) {
+      return;
+    }
+    await change(key, -acquireResult.lackingAmount);
+  }
+
+  private async releaseSingleHashLackingAmount<K extends string | number>(
+    key: Key,
+    id: Key,
+    acquireResult: AcquiredResult<K>,
+    change: (key: Key, id: Key, amount: number) => Promise<NumericValue>,
+  ): Promise<void> {
+    if (acquireResult.lackingAmount <= 0) {
+      return;
+    }
+    await change(key, id, -acquireResult.lackingAmount);
+  }
+
   private async runAcquireCallback<K extends string | number, T>(
     fn: (acquireResult: AcquiredResult<K>[]) => Awaitable<T>,
     acquiredResults: AcquiredResult<K>[],
@@ -402,6 +478,7 @@ export class Acquire {
     if (item.limitAmount === undefined || item.limitAmount === null) {
       return {
         key: item.key,
+        currentAmount: newAmount,
         acquiredAmount: item.desireAmount,
         lackingAmount: 0,
       };
@@ -412,6 +489,7 @@ export class Acquire {
     const acquiredAmount = Math.min(item.desireAmount, availableAmount);
     return {
       key: item.key,
+      currentAmount: prevAmount + acquiredAmount,
       acquiredAmount,
       lackingAmount: item.desireAmount - acquiredAmount,
     };
@@ -430,4 +508,34 @@ const parseFloatValue = (value: NumericValue): number => {
     return value;
   }
   return parseFloat(value);
+};
+
+const normalizeAcquireOptions = (
+  options?: AcquireOptionsInput,
+): AcquireOptions => {
+  if (typeof options === "boolean") {
+    return { float: options };
+  }
+  return options ?? {};
+};
+
+const assertFiniteItems = <K extends string | number>(
+  items: AcquireDesire<K>[],
+): void => {
+  for (const item of items) {
+    assertFiniteAmount(item.desireAmount);
+    assertFiniteLimit(item.limitAmount);
+  }
+};
+
+const assertFiniteAmount = (amount: number): void => {
+  if (!Number.isFinite(amount)) {
+    throw new AcquireFailedError(NON_FINITE_AMOUNT_MESSAGE);
+  }
+};
+
+const assertFiniteLimit = (limit: number | undefined): void => {
+  if (limit !== undefined && !Number.isFinite(limit)) {
+    throw new AcquireFailedError(NON_FINITE_AMOUNT_MESSAGE);
+  }
 };

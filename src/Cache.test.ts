@@ -1,13 +1,18 @@
 /// <reference types="jest" />
 
 import Redis from 'ioredis';
+import { Acquire } from './Acquire';
 import Cache from './index';
+import { LuaAcquire } from './LuaAcquire';
 
 type CachedValue = string | number;
 type CachedValueMap = Record<string, CachedValue | undefined>;
 type ObjectFetcher = (ids: string[]) => Record<string, CachedValue>;
 type ArrayFetcher = (ids: string[]) => Array<CachedValue | undefined>;
 type MapFetcher = (ids: string[]) => Map<string, CachedValue | undefined>;
+type RedisCommand = { name?: unknown };
+
+const LUA_COMMAND_NAMES = ['eval', 'evalsha'];
 
 describe('Cache', () => {
   const config = {
@@ -59,6 +64,15 @@ describe('Cache', () => {
       setTimeout(resolve, ms);
     });
 
+  const hasLuaCommand = (spy: {
+    mock: { calls: ReadonlyArray<ReadonlyArray<unknown>> };
+  }): boolean => {
+    return spy.mock.calls.some(([command]) => {
+      const name = String((command as RedisCommand).name);
+      return LUA_COMMAND_NAMES.includes(name);
+    });
+  };
+
   beforeEach(async () => {
     await redis.flushdb();
   });
@@ -92,6 +106,28 @@ describe('Cache', () => {
         const cache = new Cache(params);
         expect(cache.redis).toBe(redis);
         expect(cache['parser']).toBe(parser);
+      });
+    });
+
+    describe('when no acquire type is configured', () => {
+      it('uses LuaAcquire by default', () => {
+        const cache = new Cache(redis);
+        expect(cache['acquireHelper']).toBeInstanceOf(LuaAcquire);
+      });
+    });
+
+    describe('when pipeline acquire type is configured', () => {
+      it('uses Acquire', () => {
+        const cache = new Cache({ redis, acquireType: 'pipeline' });
+        expect(cache['acquireHelper']).toBeInstanceOf(Acquire);
+      });
+    });
+
+    describe('when acquire helper is configured', () => {
+      it('uses the provided helper', () => {
+        const acquire = new Acquire(redis);
+        const cache = new Cache({ redis, acquire });
+        expect(cache['acquireHelper']).toBe(acquire);
       });
     });
   });
@@ -590,13 +626,32 @@ describe('Cache', () => {
     let fn: (current: number) => number = (current) => current;
 
     it('increases value and return fn call', async () => {
+      const sendCommandSpy = jest.spyOn(redis, 'sendCommand');
       expect(await cache.acquire(key, 2, fn)).toBe(2);
       expect(await cache.getCache(key)).toBe(2);
       expect(await cache.acquire(key, 1, fn)).toBe(3);
       expect(await cache.getCache(key)).toBe(3);
       expect(await cache.acquire(key2, 2.5, fn, true)).toBe(2.5);
       expect(await cache.getCache(key2)).toBe(2.5);
+      expect(hasLuaCommand(sendCommandSpy)).toBe(false);
+      sendCommandSpy.mockRestore();
     });
+
+    it('passes acquired and lacking amounts with limit options', async () => {
+      await cache.setCache(key, 8);
+      const sendCommandSpy = jest.spyOn(redis, 'sendCommand');
+      const result = await cache.acquire(
+        key,
+        5,
+        (current, acquired, lacking) => ({ current, acquired, lacking }),
+        { limit: 10 },
+      );
+      expect(result).toEqual({ current: 10, acquired: 2, lacking: 3 });
+      expect(await cache.getCache(key)).toBe(10);
+      expect(hasLuaCommand(sendCommandSpy)).toBe(true);
+      sendCommandSpy.mockRestore();
+    });
+
     it('release value if fn raise error', async () => {
       const fn = (current: number): never => {
         throw new Error(String(current));
@@ -617,8 +672,8 @@ describe('Cache', () => {
         (acquiredResults) => acquiredResults,
       );
       expect(result).toEqual([
-        { key, acquiredAmount: 2, lackingAmount: 0 },
-        { key: key2, acquiredAmount: 1, lackingAmount: 2 },
+        { key, currentAmount: 2, acquiredAmount: 2, lackingAmount: 0 },
+        { key: key2, currentAmount: 5, acquiredAmount: 1, lackingAmount: 2 },
       ]);
       expect(await cache.getCache(key)).toBe(2);
       expect(await cache.getCache(key2)).toBe(5);
@@ -640,19 +695,91 @@ describe('Cache', () => {
       expect(await cache.getCache(key)).toBe(0);
       expect(await cache.getCache(key2)).toBe(0);
     });
+
+    it('supports float limits', async () => {
+      await cache.setCache(key2, 1.5);
+      const result = await cache.acquireMany(
+        [{ key: key2, desireAmount: 1.25, limitAmount: 2 }],
+        (acquiredResults) => acquiredResults,
+        { float: true },
+      );
+      expect(result).toEqual([
+        {
+          key: key2,
+          currentAmount: 2,
+          acquiredAmount: 0.5,
+          lackingAmount: 0.75,
+        },
+      ]);
+      expect(await cache.getCache(key2)).toBe(2);
+    });
+
+    it('rejects non-finite float amounts before acquiring any keys', async () => {
+      await cache.setCache(key, 4);
+
+      await expect(
+        cache.acquireMany(
+          [
+            { key, desireAmount: 2 },
+            { key: key2, desireAmount: Number.NaN },
+          ],
+          (acquiredResults) => acquiredResults,
+          { float: true },
+        ),
+      ).rejects.toThrow('Acquire amounts must be finite numbers');
+      expect(await cache.getCache(key)).toBe(4);
+      expect(await cache.getCache(key2)).toBeUndefined();
+    });
+
+    it('does not partially acquire when one key cannot be incremented', async () => {
+      await cache.setCache(key, 4);
+      await redis.set(key2, 'not-an-integer');
+
+      await expect(
+        cache.acquireMany(
+          [
+            { key: key2, desireAmount: 1 },
+            { key, desireAmount: 2 },
+          ],
+          (acquiredResults) => acquiredResults,
+        ),
+      ).rejects.toThrow('Failed to acquire requested amounts');
+      expect(await cache.getCache(key)).toBe(4);
+      expect(await redis.get(key2)).toBe('not-an-integer');
+    });
   });
 
   describe('#hashAcquire', () => {
     let fn: (current: number) => number = (current) => current;
 
     it('increases value and return fn call', async () => {
+      const sendCommandSpy = jest.spyOn(redis, 'sendCommand');
       expect(await cache.hashAcquire(key, id, 2, fn)).toBe(2);
       expect(await cache.getHashCache(key, id)).toBe(2);
       expect(await cache.hashAcquire(key, id, 1, fn)).toBe(3);
       expect(await cache.getHashCache(key, id)).toBe(3);
       expect(await cache.hashAcquire(key2, id, 2.5, fn, true)).toBe(2.5);
       expect(await cache.getHashCache(key2, id)).toBe(2.5);
+      expect(hasLuaCommand(sendCommandSpy)).toBe(false);
+      sendCommandSpy.mockRestore();
     });
+
+    it('passes acquired and lacking hash amounts with limit options', async () => {
+      await cache.setHashCache(key, id, 8);
+      const sendCommandSpy = jest.spyOn(redis, 'sendCommand');
+      const result = await cache.hashAcquire(
+        key,
+        id,
+        5,
+        (current, acquired, lacking) => ({ current, acquired, lacking }),
+        { limit: 10 },
+      );
+      expect(result).toEqual({ current: 10, acquired: 2, lacking: 3 });
+      expect(await cache.getHashCache(key, id)).toBe(10);
+      expect(hasLuaCommand(sendCommandSpy)).toBe(true);
+      sendCommandSpy.mockRestore();
+    });
+
     it('release value if fn raise error', async () => {
       const fn = (current: number): never => {
         throw new Error(String(current));
@@ -676,8 +803,8 @@ describe('Cache', () => {
           (acquiredResults) => acquiredResults,
         );
         expect(result).toEqual([
-          { key: id, acquiredAmount: 2, lackingAmount: 0 },
-          { key: id2, acquiredAmount: 1, lackingAmount: 2 },
+          { key: id, currentAmount: 2, acquiredAmount: 2, lackingAmount: 0 },
+          { key: id2, currentAmount: 5, acquiredAmount: 1, lackingAmount: 2 },
         ]);
         expect(await cache.getHashCache(key, id)).toBe(2);
         expect(await cache.getHashCache(key, id2)).toBe(5);
@@ -701,6 +828,64 @@ describe('Cache', () => {
       expect(await cache.getHashCache(key, id)).toBe(0);
       expect(await cache.getHashCache(key, id2)).toBe(0);
     });
+
+    it('supports float hash limits', async () => {
+      await cache.setHashCache(key, id2, 1.5);
+      const result = await cache.hashAcquireMany(
+        key,
+        [{ key: id2, desireAmount: 1.25, limitAmount: 2 }],
+        (acquiredResults) => acquiredResults,
+        { float: true },
+      );
+      expect(result).toEqual([
+        {
+          key: id2,
+          currentAmount: 2,
+          acquiredAmount: 0.5,
+          lackingAmount: 0.75,
+        },
+      ]);
+      expect(await cache.getHashCache(key, id2)).toBe(2);
+    });
+
+    it('rejects non-finite float hash amounts before acquiring any fields', async () => {
+      await cache.setHashCache(key, id, 4);
+
+      await expect(
+        cache.hashAcquireMany(
+          key,
+          [
+            { key: id, desireAmount: 2 },
+            { key: id2, desireAmount: Number.POSITIVE_INFINITY },
+          ],
+          (acquiredResults) => acquiredResults,
+          { float: true },
+        ),
+      ).rejects.toThrow('Acquire amounts must be finite numbers');
+      expect(await cache.getHashCache(key, id)).toBe(4);
+      expect(await cache.getHashCache(key, id2)).toBeUndefined();
+    });
+
+    it(
+      'does not partially acquire when one hash field cannot be incremented',
+      async () => {
+        await cache.setHashCache(key, id, 4);
+        await redis.hset(key, id2, 'not-an-integer');
+
+        await expect(
+          cache.hashAcquireMany(
+            key,
+            [
+              { key: id2, desireAmount: 1 },
+              { key: id, desireAmount: 2 },
+            ],
+            (acquiredResults) => acquiredResults,
+          ),
+        ).rejects.toThrow('Failed to acquire requested amounts');
+        expect(await cache.getHashCache(key, id)).toBe(4);
+        expect(await redis.hget(key, id2)).toBe('not-an-integer');
+      },
+    );
   });
 
   afterAll(async () => {

@@ -1,11 +1,9 @@
 import type Redis from 'ioredis';
 import type { RedisKey } from 'ioredis';
+import type { AcquiredResult, AcquireDesire, AcquireOptions } from './Acquire';
 import { Acquire } from './Acquire';
-import type {
-  AcquiredResult,
-  AcquireDesire,
-  AcquireOptions,
-} from './Acquire';
+import type { AcquireHelper } from './AcquireHelper';
+import { LuaAcquire } from './LuaAcquire';
 
 // TODO: type this without narrowing the public parser contract.
 interface Parser {
@@ -16,9 +14,12 @@ interface Parser {
 interface CacheOptions {
   redis: Redis;
   parser?: Parser;
+  acquire?: AcquireHelper;
+  acquireType?: AcquireType;
 }
 
 type Key = RedisKey | number;
+type AcquireType = 'lua' | 'pipeline';
 
 type Mapping<T> = { [id: string]: T };
 
@@ -34,6 +35,7 @@ type CacheReturn<T> = T | typeof NOT_FOUND_VALUE;
 
 const SET_PARAM_SIZE = 2;
 const INVALID_REDIS_INSTANCE_MESSAGE = 'Cache requires an ioredis instance';
+const DEFAULT_ACQUIRE_TYPE: AcquireType = 'lua';
 
 const REQUIRED_REDIS_COMMANDS = [
   'set',
@@ -64,14 +66,15 @@ const isRedis = (obj: unknown): obj is Redis => {
 
 class Cache {
   redis: Redis;
-  private readonly acquireHelper: Acquire;
+  private readonly acquireHelper: AcquireHelper;
   protected prefix: string;
   protected parser: Parser = JSON;
 
   /**
    * @param options - Either an ioredis instance directly or a CacheOptions object
-   *   with a `redis` property and optional `parser`. Throws if the redis instance
-   *   doesn't satisfy the ioredis interface check.
+   *   with a `redis` property plus optional `parser`, `acquire`, and
+   *   `acquireType`. Throws if the redis instance doesn't satisfy the ioredis
+   *   interface check.
    */
   constructor(options: Redis | CacheOptions) {
     const config = (
@@ -83,11 +86,27 @@ class Cache {
     }
 
     this.redis = config.redis;
-    this.acquireHelper = new Acquire(this.redis);
+    this.acquireHelper = this.createAcquireHelper(
+      config.acquire,
+      config.acquireType ?? DEFAULT_ACQUIRE_TYPE,
+    );
     this.prefix = this.redis.options.keyPrefix || '';
     if (config.parser !== undefined) {
       this.parser = config.parser;
     }
+  }
+
+  private createAcquireHelper(
+    acquire: AcquireHelper | undefined,
+    acquireType: AcquireType,
+  ): AcquireHelper {
+    if (acquire !== undefined) {
+      return acquire;
+    }
+    if (acquireType === 'pipeline') {
+      return new Acquire(this.redis);
+    }
+    return new LuaAcquire(this.redis);
   }
 
   /**
@@ -382,16 +401,21 @@ class Cache {
    *
    * @param key - Redis key holding the counter.
    * @param amount - Amount to add (use a negative number to decrement).
-   * @param fn - Callback receiving the new counter value.
-   * @param float - When `true` uses `INCRBYFLOAT` instead of `INCRBY`.
+   * @param fn - Callback receiving current, acquired, and lacking amounts.
+   * @param options - When `float` is true uses `INCRBYFLOAT`; `limit` caps
+   *   how much can be acquired.
    */
   async acquire<T>(
     key: Key,
     amount: number,
-    fn: (current: number) => Awaitable<T>,
-    float: boolean = false,
+    fn: (
+      currentAmount: number,
+      acquiredAmount: number,
+      lackingAmount: number,
+    ) => Awaitable<T>,
+    options?: AcquireOptions | boolean,
   ): Promise<T> {
-    return this.acquireHelper.acquire(key, amount, fn, float);
+    return this.acquireHelper.acquire(key, amount, fn, options);
   }
 
   /**
@@ -401,23 +425,28 @@ class Cache {
    * @param key - The Redis hash key.
    * @param id - The field name within the hash.
    * @param amount - Amount to add.
-   * @param fn - Callback receiving the new counter value.
-   * @param float - When `true` uses `HINCRBYFLOAT` instead of `HINCRBY`.
+   * @param fn - Callback receiving current, acquired, and lacking amounts.
+   * @param options - When `float` is true uses `HINCRBYFLOAT`; `limit` caps
+   *   how much can be acquired.
    */
   async hashAcquire<T>(
     key: Key,
     id: Key,
     amount: number,
-    fn: (current: number) => Awaitable<T>,
-    float: boolean = false,
+    fn: (
+      currentAmount: number,
+      acquiredAmount: number,
+      lackingAmount: number,
+    ) => Awaitable<T>,
+    options?: AcquireOptions | boolean,
   ): Promise<T> {
-    return this.acquireHelper.hashAcquire(key, id, amount, fn, float);
+    return this.acquireHelper.hashAcquire(key, id, amount, fn, options);
   }
 
   /**
-   * Atomically modifies multiple counters in a single Redis pipeline execution.
-   * Each desired change is specified as an `AcquireDesire` item; `fn` receives
-   * the final values.
+   * Atomically modifies multiple counters through the configured acquire
+   * helper. Each desired change is specified as an `AcquireDesire` item; `fn`
+   * receives the final values.
    */
   async acquireMany<K extends string | number, T>(
     items: AcquireDesire<K>[],
@@ -429,7 +458,7 @@ class Cache {
 
   /**
    * Atomically modifies multiple fields inside a single Redis hash counter
-   * via a Redis pipeline.
+   * through the configured acquire helper.
    *
    * @param hashKey - The Redis hash key containing the counters.
    * @param items - Desired changes for each field.
